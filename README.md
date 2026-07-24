@@ -1,134 +1,93 @@
-# 🐺 Nightfall
+# Nightfall
 
-> A real-time, web-based multiplayer social deduction browser game powered by **React**, **Node.js / Express**, and **Socket.io**.
+A real-time multiplayer social deduction browser game built with React, Node.js, Express, and Socket.io.
 
-![Nightfall Banner](client/public/background.png)
+## Overview
 
----
+Nightfall is a browser-based social deduction game. Players receive secret roles such as Werewolf, Seer, Bodyguard, Tanner, and Cthulhu. During the Night phase, role powers activate in order to gather information or manipulate cards. During the Day phase, players debate and vote on who to eliminate.
 
-## 🌟 Overview
+## Features
 
-**Nightfall** is an interactive one-night social deduction game designed for browser-based multiplayer sessions. Players take on hidden roles—from cunning Werewolves to sharp Seers, protective Bodyguards, chaotic Tanner, and mysterious Cthulhu.
+- Real-Time Multiplayer: Room management and socket communication using Socket.io.
+- Bot Support: Add AI bots to test game logic or fill player seats.
+- 50+ Roles: Includes standard social deduction roles and custom additions (Cthulhu, Yandere, Disruptor, Reflector, Dawn Bringer).
+- Custom Decks: Deck customization, configurable night kills, and phase timers.
+- Tested Engine: 63 automated tests for role mechanics, turn queues, and win resolution.
 
-During the Night phase, secret role powers wake in sequence to manipulate cards, protect allies, or gather intelligence. When dawn arrives, the village holds a debate and votes to eliminate suspected wolves!
-
----
-
-## ✨ Features
-
-- **🎮 Real-Time Multiplayer**: Instant room creation, join codes, and dynamic room listing via Socket.io.
-- **🤖 Built-in AI Bot Testing**: Add or remove AI bots dynamically to test game loops or play solo.
-- **🎭 50+ Unique Roles**: Includes classic roles (Werewolf, Seer, Robber, Troublemaker, Tanner, Drunk) plus custom roles (Cthulhu, Yandere, Disruptor, Reflector, Dawn Bringer).
-- **🛠️ Custom Deck Editor**: Hosts can customize card decks, toggle first-night wolf kills, and tweak phase timers.
-- **🧪 Verified Engine**: 63+ automated test suites covering role mechanics, night priority queues, win conditions, and edge cases.
-- **🎵 Atmospheric UI & Audio**: Custom dark fantasy visual theme, role artwork, and ambient audio cues.
-
----
-
-## 🚀 Quick Start
+## Quick Start
 
 ### Prerequisites
 
-- **Node.js** 18+ (Node 20 recommended)
-- **npm** 9+
+- Node.js 18+
+- npm 9+
 
-### 1. Clone the repository
+### Installation and Setup
 
-```bash
-git clone https://github.com/your-username/nightfall.git
-cd nightfall
-```
-
-### 2. Install dependencies
-
-```bash
-# Install root dependencies
-npm install
-
-# Install frontend client dependencies
-npm run client:install
-```
-
-### 3. Build the client
-
-```bash
-npm run build
-```
-
-### 4. Run the engine tests
-
-```bash
-npm run test:engine
-```
-
-### 5. Start the server
-
-```bash
-# Start server (serves the built client at http://localhost:3001)
-npm start
-```
-
-Open your browser to `http://localhost:3001` to play!
-
----
-
-## 🛠️ Development Setup
-
-For active client & server development with Hot Module Replacement (HMR):
-
-1. **Start the backend server**:
+1. Clone the repository:
    ```bash
-   npm start
-   # Server runs at http://localhost:3001
+   git clone https://github.com/AlinV2V/nightfall.git
+   cd nightfall
    ```
 
-2. **Start the Vite frontend dev server** (in a separate terminal):
+2. Install dependencies:
+   ```bash
+   npm install
+   npm run client:install
+   ```
+
+3. Build the client:
+   ```bash
+   npm run build
+   ```
+
+4. Run tests:
+   ```bash
+   npm run test:engine
+   ```
+
+5. Start the server:
+   ```bash
+   npm start
+   ```
+
+Access the app in your browser at `http://localhost:3001`.
+
+## Development Setup
+
+To run client and server independently during development:
+
+1. Start the server:
+   ```bash
+   npm start
+   ```
+
+2. In a separate terminal, start the Vite dev server:
    ```bash
    cd client
    npm run dev
-   # Vite dev server runs at http://localhost:5173
    ```
 
----
-
-## 📁 Repository Structure
+## Repository Structure
 
 ```
 nightfall/
-├── client/              # React + Vite Frontend Application
-│   ├── public/          # Audio clips, icons, and role card artwork
-│   └── src/             # App components, styles, and Socket listeners
-├── server/              # Express + Socket.io Server & Engine
-│   ├── gameEngine.js    # Core state machine, role resolution & win checks
-│   ├── index.js         # Socket.io event handlers & static file server
-│   └── logic_check.js   # Engine test suite runner (63 tests)
-├── DEPLOYMENT.md        # Single-VPS deployment & Nginx configuration guide
-├── LOGIC_AUDIT.md       # Game mechanics audit & role edge-case documentation
-├── LICENSE              # Open-source license
-└── package.json         # Root scripts & dependency manifest
+├── client/              # React + Vite frontend
+│   ├── public/          # Assets, audio, and role card artwork
+│   └── src/             # Frontend source code and socket handlers
+├── server/              # Express + Socket.io server
+│   ├── gameEngine.js    # Game loop, turn queues, and win resolution
+│   ├── index.js         # Socket event router and static file server
+│   └── logic_check.js   # Engine test suite runner
+├── DEPLOYMENT.md        # Single-VPS deployment guide
+├── LOGIC_AUDIT.md       # Mechanics audit and role reference
+├── LICENSE              # License file
+└── package.json         # Project scripts and dependencies
 ```
 
----
+## Deployment
 
-## ☁️ Deployment
+For production deployment instructions using Nginx, PM2, and SSL, see [DEPLOYMENT.md](DEPLOYMENT.md).
 
-For single-VPS deployment guides using **Nginx**, **PM2**, and **Certbot (SSL)**, see [DEPLOYMENT.md](DEPLOYMENT.md).
+## License
 
----
-
-## 🤝 Contributing
-
-Contributions, bug reports, and feature requests are welcome!
-
-1. Fork the project
-2. Create your feature branch (`git checkout -b feature/AmazingFeature`)
-3. Commit your changes (`git commit -m 'Add some AmazingFeature'`)
-4. Run engine tests (`npm run test:engine`)
-5. Push to the branch (`git push origin feature/AmazingFeature`)
-6. Open a Pull Request
-
----
-
-## 📜 License
-
-Distributed under the **ISC License**. See [LICENSE](LICENSE) for more information.
+Distributed under the ISC License. See [LICENSE](LICENSE) for details.

@@ -1,0 +1,29 @@
+{
+  "name": "nightfall",
+  "version": "1.0.0",
+  "description": "Nightfall - A one-night social deduction browser game",
+  "main": "server/index.js",
+  "scripts": {
+    "start": "node server/index.js",
+    "dev": "node server/index.js",
+    "build": "npm --prefix client run build",
+    "client:install": "npm --prefix client install",
+    "test:engine": "node server/logic_check.js"
+  },
+  "keywords": [
+    "game",
+    "social-deduction",
+    "multiplayer"
+  ],
+  "author": "",
+  "license": "ISC",
+  "type": "commonjs",
+  "dependencies": {
+    "cors": "^2.8.5",
+    "express": "^4.21.2",
+    "socket.io": "^4.8.1"
+  },
+  "devDependencies": {
+    "socket.io-client": "^4.8.3"
+  }
+}

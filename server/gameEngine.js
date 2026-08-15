@@ -302,6 +302,7 @@ class GameEngine {
     this.nightQueue = [];
     this.timeLeft = 0;
     this.phaseEndsAt = null;
+    this.phaseDuration = 0;
     this.winner = null;
 
     this.cupidLinks = {};                 // {playerId -> partnerId}
@@ -759,6 +760,7 @@ class GameEngine {
     this.clearTimer();
     if (this.phase !== 'night') return;
     this.timeLeft = Math.ceil(NIGHT_REVIEW_GRACE_MS / 1000);
+    this.phaseDuration = this.timeLeft;
     this.phaseEndsAt = Date.now() + NIGHT_REVIEW_GRACE_MS;
     this.timer = setTimeout(() => this.forceResolveNightReview(), NIGHT_REVIEW_GRACE_MS);
   }
@@ -917,6 +919,7 @@ class GameEngine {
       phase: this.phase,
       timeLeft: this.timeLeft,
       phaseEndsAt: this.phaseEndsAt,
+      phaseDuration: this.phaseDuration,
     });
   }
 
@@ -926,6 +929,10 @@ class GameEngine {
   startPhaseTimer(seconds, onExpire) {
     this.clearTimer();
     this.timeLeft = seconds;
+    // Published alongside the deadline so clients can draw a countdown arc
+    // without having to guess the span from settings — some wake phases run
+    // longer than their configured base.
+    this.phaseDuration = seconds;
     this.phaseEndsAt = Date.now() + seconds * 1000;
     this.timer = setInterval(() => {
       const remaining = Math.max(0, Math.ceil((this.phaseEndsAt - Date.now()) / 1000));
@@ -1661,6 +1668,8 @@ class GameEngine {
         : undefined,
       centerCards: center,
       timeLeft: this.timeLeft,
+      phaseEndsAt: this.phaseEndsAt,
+      phaseDuration: this.phaseDuration,
       currentNightAction: myActiveRole ? this.currentNightAction : null,
       nightPendingContinue: !!(playerId && this.hasPendingNightResultAck(playerId)),
       publicAssignments,
@@ -3692,6 +3701,10 @@ class GameEngine {
     this.currentNightAction = null;
     this.currentNightActors = [];
     this.pendingNightResultAcks = {};
+    // No phase is running any more, so retire the countdown with it.
+    this.timeLeft = 0;
+    this.phaseEndsAt = null;
+    this.phaseDuration = 0;
     this.clearAllTimers();
     this.broadcastState();
     return true;

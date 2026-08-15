@@ -1603,3 +1603,55 @@ run('broadcast state does not leak socket handles', () => {
   });
   game.clearAllTimers();
 });
+
+// ── Night clock secrecy ───────────────────────────────────────────────
+// Wake phases are not all the same length — the hunt runs longer than the rest —
+// so a room-wide countdown would tell sleeping players exactly which role is up.
+
+run('night phase clocks are hidden from players who are not awake', () => {
+  const game = makeGame();
+  seatPlayers(game, ['Werewolf', 'Villager', 'Seer', 'Villager']);
+  game.phase = 'night';
+  game.currentNightAction = 'Werewolf';
+  game.currentNightActors = ['p1'];
+  game.phaseEndsAt = Date.now() + 25000;
+  game.phaseDuration = 25;
+
+  const wolf = game.getSanitizedState('s1');
+  assert.equal(wolf.phaseDuration, 25);
+  assert.ok(wolf.phaseEndsAt, 'the acting player should see their own clock');
+
+  const asleep = game.getSanitizedState('s2');
+  assert.equal(asleep.phaseEndsAt, null, 'a sleeping player must not see the deadline');
+  assert.equal(asleep.phaseDuration, 0, 'a sleeping player must not see the wake length');
+  game.clearAllTimers();
+});
+
+run('night ticks go only to the players who are awake', () => {
+  const game = makeGame();
+  seatPlayers(game, ['Werewolf', 'Villager', 'Seer']);
+  game.phase = 'night';
+  game.currentNightAction = 'Werewolf';
+  game.currentNightActors = ['p1'];
+
+  game._events.length = 0;
+  game.emitTick();
+
+  const ticks = game._events.filter(e => e.event === 'phaseTick');
+  assert.deepEqual(ticks.map(e => e.scope), ['s1']);
+  assert.equal(ticks.filter(e => e.scope === 'room').length, 0);
+  game.clearAllTimers();
+});
+
+run('day phase ticks still reach the whole room', () => {
+  const game = makeGame();
+  seatPlayers(game, ['Werewolf', 'Villager', 'Seer']);
+  game.phase = 'day';
+
+  game._events.length = 0;
+  game.emitTick();
+
+  const ticks = game._events.filter(e => e.event === 'phaseTick');
+  assert.deepEqual(ticks.map(e => e.scope), ['room']);
+  game.clearAllTimers();
+});

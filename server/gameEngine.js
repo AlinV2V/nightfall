@@ -915,11 +915,22 @@ class GameEngine {
   }
 
   emitTick() {
-    this.emitToRoom('phaseTick', {
+    const payload = {
       phase: this.phase,
       timeLeft: this.timeLeft,
       phaseEndsAt: this.phaseEndsAt,
       phaseDuration: this.phaseDuration,
+    };
+    if (this.phase !== 'night') {
+      this.emitToRoom('phaseTick', payload);
+      return;
+    }
+    // Wake phases differ in length — the hunt runs longer than the rest — so a
+    // room-wide night countdown would tell sleeping players which role is up.
+    // Only the players actually awake for this wake get the clock.
+    this.currentNightActors.forEach((pid) => {
+      const socketId = this.getSocketId(pid);
+      if (socketId) this.emitTo(socketId, 'phaseTick', payload);
     });
   }
 
@@ -1509,6 +1520,7 @@ class GameEngine {
       }
     }
 
+    const nightClockVisible = this.phase !== 'night' || !!myActiveRole;
     const isWerewolfTurn = this.phase === 'night' && this.currentNightAction === 'Werewolf' && myActiveRole === 'Werewolf';
     const currentActors = this.phase === 'night' && this.currentNightAction
       ? (this.currentNightActors.length > 0 ? this.currentNightActors : this.getActiveActors(this.currentNightAction))
@@ -1668,8 +1680,10 @@ class GameEngine {
         : undefined,
       centerCards: center,
       timeLeft: this.timeLeft,
-      phaseEndsAt: this.phaseEndsAt,
-      phaseDuration: this.phaseDuration,
+      // Gated exactly like currentNightAction: at night the clock is only for the
+      // players who are awake, since the wake length identifies the phase.
+      phaseEndsAt: nightClockVisible ? this.phaseEndsAt : null,
+      phaseDuration: nightClockVisible ? this.phaseDuration : 0,
       currentNightAction: myActiveRole ? this.currentNightAction : null,
       nightPendingContinue: !!(playerId && this.hasPendingNightResultAck(playerId)),
       publicAssignments,

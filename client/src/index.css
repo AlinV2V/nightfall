@@ -3915,3 +3915,34 @@ h1, h2, h3, h4 {
   .center-timer.phase-timer.is-critical { animation: none; }
   .phase-timer-sweep { transition: none; }
 }
+
+/* ── Reconnect badge ─────────────────────────────────────────
+   Distinct from the flat "Offline" state: a pulsing pip plus a live
+   countdown, so the table can tell "wait for them" from "they're gone".
+   ============================================================ */
+.player-badge.reconnect-badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  color: var(--moon);
+  background: rgba(120, 150, 235, 0.14);
+  border: 1px solid rgba(140, 170, 255, 0.34);
+}
+
+.reconnect-pip {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: var(--moon);
+  box-shadow: 0 0 8px rgba(140, 170, 255, 0.9);
+  animation: reconnectPulse 1.2s ease-in-out infinite;
+}
+
+@keyframes reconnectPulse {
+  0%, 100% { opacity: 0.35; transform: scale(0.82); }
+  50%      { opacity: 1;    transform: scale(1); }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .reconnect-pip { animation: none; opacity: 0.9; }
+}

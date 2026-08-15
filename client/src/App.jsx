@@ -263,9 +263,7 @@ const RoundTable =({ players, playerId, phase, isMyTurn, accusedId, tableOverlay
                       {p.isHost && !isSelf && (
                         <span className="player-badge host-badge">Host</span>
                       )}
-                      {!p.connected && (
-                        <span className="player-badge muted-badge">Offline</span>
-                      )}
+                      {!p.connected && <ReconnectBadge deadline={p.reconnectDeadline} />}
                       {(phase === 'vote' || phase === 'accusation' || phase === 'trial') && p.hasVoted && (
                         <span className="player-badge voted-badge">Voted</span>
                       )}
@@ -2522,6 +2520,23 @@ const PhaseCinematic = ({ scene }) => {
       </div>
       <div className="phase-cinematic-rule" />
     </div>
+  );
+};
+
+/* ─── Reconnect badge ───
+   A dropped player is usually on their way back — a locked phone, a refreshed
+   tab, a tunnel. Showing their seat counting down tells the table to wait
+   instead of reading the silence as a quit. */
+const ReconnectBadge = ({ deadline }) => {
+  const secondsLeft = usePhaseCountdown(deadline, 0);
+  if (!deadline || secondsLeft <= 0) {
+    return <span className="player-badge muted-badge">Offline</span>;
+  }
+  return (
+    <span className="player-badge reconnect-badge" title="Holding their seat">
+      <span className="reconnect-pip" aria-hidden="true" />
+      Back in {secondsLeft}s
+    </span>
   );
 };
 

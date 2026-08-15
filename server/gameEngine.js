@@ -199,6 +199,17 @@ const NIGHT_REVIEW_GRACE_MS = 25000;
 // bookkeeping and is withheld from the client.
 const ACCUSED_VISIBLE_PHASES = new Set(['accusation', 'defense', 'trial', 'end']);
 
+// How long a seat is held for a player who dropped. In the lobby a seat is cheap
+// and should free up fast. Mid-game it is anything but — the player holds a card
+// the whole table is reasoning about — so a locked phone, a tab refresh or a
+// tunnel gets a generous window to come back to the same game.
+const LOBBY_RECONNECT_GRACE_MS = 5000;
+const GAME_RECONNECT_GRACE_MS = 120000;
+
+// The night queue is a separate concern from the seat and cannot wait out the
+// full window, so a dropped player's hold on it is released much sooner.
+const NIGHT_HOLD_RELEASE_MS = 5000;
+
 class GameEngine {
   constructor(roomId, roomIo, rawIo) {
     this.roomId = roomId;
@@ -229,6 +240,7 @@ class GameEngine {
     this.botTimers = new Set();
     this.botDebugLog = []; // [{ time, bot, role, action, detail }]
     this.botDebugMax = 200;
+    this.disconnectTimers = new Set();
 
     this.resetGameState();
   }
@@ -987,10 +999,28 @@ class GameEngine {
     }
   }
 
+  // Reconnect windows outlive phases, so they are tracked separately from the
+  // phase timer — but they must still be droppable, or an abandoned room keeps
+  // the process awake for the length of its longest grace.
+  scheduleDisconnectTimer(fn, delay) {
+    const handle = setTimeout(() => {
+      this.disconnectTimers.delete(handle);
+      fn();
+    }, delay);
+    this.disconnectTimers.add(handle);
+    return handle;
+  }
+
+  clearDisconnectTimers() {
+    this.disconnectTimers.forEach(handle => clearTimeout(handle));
+    this.disconnectTimers.clear();
+  }
+
   clearAllTimers() {
     this.clearTimer();
     this.clearDealTimer();
     this.clearBotTimers();
+    this.clearDisconnectTimers();
     if (this.jailerChatTimer) {
       clearTimeout(this.jailerChatTimer);
       this.jailerChatTimer = null;
@@ -1366,9 +1396,18 @@ class GameEngine {
         });
         return null;
       }
+      const wasAway = !existing.connected;
       existing.socketId = socketId;
       existing.connected = true;
       existing.name = name;
+      existing.disconnectedAt = null;
+      existing.reconnectDeadline = null;
+      if (wasAway) {
+        this.logEvent(`${existing.name} reconnected.`);
+        // A room left without a connected human still needs someone at the
+        // controls when the first player walks back in.
+        if (!this.players.some(x => x.isHost && x.connected && !x.isBot)) this.reassignHost();
+      }
       this.emitTo(socketId, 'sessionToken', { token: existing.sessionToken });
       this.broadcastState();
       return existing.sessionToken;
@@ -1396,34 +1435,76 @@ class GameEngine {
     return newToken;
   }
 
+  isGameInProgress() {
+    return this.phase !== 'lobby' && this.phase !== 'end';
+  }
+
+  countConnectedHumans() {
+    return this.players.filter(p => p.connected && !p.isBot).length;
+  }
+
+  // Host is a control role, not a seat. When the holder drops it moves on at once
+  // so the room is never left without controls — losing the host must not cost
+  // anyone their game.
+  reassignHost() {
+    const next = this.players.find(p => p.connected && !p.isBot);
+    if (!next || next.isHost) return false;
+    this.players.forEach((p) => { p.isHost = false; });
+    next.isHost = true;
+    this.logEvent(`${next.name} is now the host.`);
+    this.logBotEvent('System', 'Host', 'transfer', `Host duty passed to ${next.name}.`);
+    return true;
+  }
+
+  getReconnectGraceMs() {
+    return this.isGameInProgress() ? GAME_RECONNECT_GRACE_MS : LOBBY_RECONNECT_GRACE_MS;
+  }
+
   removePlayer(socketId) {
     const p = this.players.find(x => x.socketId === socketId);
-    if (p) {
-      const wasHumanHost = p.isHost && !p.isBot;
-      p.connected = false;
-      this.broadcastState();
+    if (!p) return;
 
-      setTimeout(() => {
-        // Only process if the player hasn't reconnected
-        if (!p.connected) {
-          if (wasHumanHost) {
-            this.endSessionBecauseHostLeft(p.id);
-            return;
-          }
-          // Never let a departed player's unread reveal hold the night queue open.
-          this.releaseNightHold(p.id);
-          if (this.phase === 'lobby') {
-            this.players = this.players.filter(x => x.id !== p.id);
-          }
-          if (this.players.length > 0 && !this.players.find(x => x.isHost && x.connected && !x.isBot)) {
-            this.players.forEach(x => x.isHost = false);
-            const first = this.players.find(x => x.connected && !x.isBot);
-            if (first) first.isHost = true;
-          }
-          this.broadcastState();
-        }
-      }, 5000);
+    p.connected = false;
+    p.disconnectedAt = Date.now();
+    const grace = this.getReconnectGraceMs();
+    p.reconnectDeadline = p.disconnectedAt + grace;
+
+    // Hand off the controls straight away rather than waiting out the grace.
+    if (p.isHost && !p.isBot) this.reassignHost();
+    this.broadcastState();
+
+    // The night is on its own clock — it cannot sit idle for the whole seat
+    // window, so any hold this player had on the queue goes much sooner.
+    this.scheduleDisconnectTimer(() => {
+      if (p.connected) return;
+      if (this.releaseNightHold(p.id)) this.broadcastState();
+    }, NIGHT_HOLD_RELEASE_MS);
+
+    this.scheduleDisconnectTimer(() => {
+      if (p.connected) return;
+      this.retireSeat(p);
+    }, grace);
+  }
+
+  // The reconnect window expired without them coming back.
+  retireSeat(p) {
+    p.reconnectDeadline = null;
+
+    if (this.countConnectedHumans() === 0) {
+      // Nobody is left to play. Collapse the room rather than leaving a game
+      // suspended around an empty table.
+      this.endSessionBecauseHostLeft(p.id);
+      return;
     }
+
+    if (this.phase === 'lobby' || this.phase === 'end') {
+      this.players = this.players.filter(x => x.id !== p.id);
+    }
+    // Mid-game the seat stays. They still hold a card the table is reasoning
+    // about and can still be voted out; they simply stop being waited on, and
+    // the door is left open if they return.
+    if (!this.players.some(x => x.isHost && x.connected && !x.isBot)) this.reassignHost();
+    this.broadcastState();
   }
 
   updateSettings(socketId, newSettings) {
@@ -1626,6 +1707,8 @@ class GameEngine {
         name: p.name,
         isHost: p.isHost,
         connected: p.connected,
+        // So the table can tell "hang on, they're coming back" from "they left".
+        reconnectDeadline: p.connected ? null : (p.reconnectDeadline || null),
         isBot: !!p.isBot,
         isDead: this.assignments[p.id]?.isDead || false,
         hasVoted: this.phase === 'accusation'

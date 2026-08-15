@@ -289,9 +289,14 @@ io.on('connection', (socket) => {
     console.log(`User disconnected: ${socket.id}`);
     const game = rooms[socket.roomId];
     if (game) {
+      // Read the grace before removePlayer, since a collapsing session can flip
+      // the phase back to lobby and shorten it.
+      const cleanupDelay = game.getReconnectGraceMs() + 10000;
       game.removePlayer(socket.id);
       // Always schedule cleanup. This catches host-leave resets where bots are
-      // removed asynchronously after the reconnect grace window.
+      // removed asynchronously after the reconnect grace window. The room must
+      // outlive the reconnect window, or a mid-game refresh finds nothing left
+      // to rejoin.
       setTimeout(() => {
         if (
           rooms[socket.roomId]
@@ -301,7 +306,7 @@ io.on('connection', (socket) => {
           delete rooms[socket.roomId];
           broadcastRoomsList();
         }
-      }, 12000);
+      }, cleanupDelay);
       broadcastRoomsList();
     }
   });

@@ -1655,3 +1655,121 @@ run('day phase ticks still reach the whole room', () => {
   assert.deepEqual(ticks.map(e => e.scope), ['room']);
   game.clearAllTimers();
 });
+
+// ── Disconnect and reconnect ──────────────────────────────────────────
+// A dropped connection used to be fatal: the host's socket going quiet for five
+// seconds wiped an in-progress game for everyone. A seat now survives a drop,
+// and host duty moves rather than the game ending.
+
+run('host duty transfers immediately instead of ending the game', () => {
+  const game = makeGame();
+  game.addPlayer('p1', 's1', 'Host');
+  game.addPlayer('p2', 's2', 'B');
+  game.addPlayer('p3', 's3', 'C');
+  game.startGame('s1');
+  game.clearAllTimers();
+  game.phase = 'night';
+  game.dayCount = 3;
+
+  game.removePlayer('s1');
+  game.clearAllTimers();
+
+  assert.equal(game.phase, 'night', 'the game must keep running');
+  assert.equal(game.dayCount, 3, 'progress must survive a host drop');
+  assert.equal(Object.keys(game.assignments).length, 3, 'roles must survive');
+  assert.equal(game.players.find(p => p.id === 'p1').connected, false);
+  assert.equal(game.players.find(p => p.id === 'p1').isHost, false);
+  assert.equal(game.players.find(p => p.id === 'p2').isHost, true, 'host duty should move on');
+});
+
+run('a mid-game seat is held far longer than a lobby seat', () => {
+  const game = makeGame();
+  game.addPlayer('p1', 's1', 'Host');
+  game.addPlayer('p2', 's2', 'B');
+  game.addPlayer('p3', 's3', 'C');
+  const lobbyGrace = game.getReconnectGraceMs();
+
+  game.startGame('s1');
+  game.clearAllTimers();
+  game.phase = 'night';
+  const gameGrace = game.getReconnectGraceMs();
+
+  assert.ok(gameGrace > lobbyGrace * 10, 'mid-game grace should dwarf the lobby one');
+  assert.ok(gameGrace >= 60000, 'a locked phone needs at least a minute');
+
+  game.removePlayer('s2');
+  game.clearAllTimers();
+  const seat = game.players.find(p => p.id === 'p2');
+  assert.ok(seat.reconnectDeadline > Date.now() + 60000, 'the seat should carry a deadline');
+});
+
+run('reconnecting restores the seat and clears the countdown', () => {
+  const game = makeGame();
+  const token = game.addPlayer('p1', 's1', 'Host');
+  game.addPlayer('p2', 's2', 'B');
+  game.addPlayer('p3', 's3', 'C');
+  game.startGame('s1');
+  game.clearAllTimers();
+  game.phase = 'night';
+
+  game.removePlayer('s1');
+  game.clearAllTimers();
+  assert.equal(game.players.find(p => p.id === 'p1').connected, false);
+
+  // Same player id and token, new socket — a refreshed tab.
+  game.addPlayer('p1', 's1-new', 'Host', token);
+  game.clearAllTimers();
+
+  const back = game.players.find(p => p.id === 'p1');
+  assert.equal(back.connected, true);
+  assert.equal(back.socketId, 's1-new');
+  assert.equal(back.reconnectDeadline, null);
+  assert.equal(back.disconnectedAt, null);
+  assert.equal(game.phase, 'night', 'they should land back in the same game');
+  assert.equal(game.assignments.p1.originalRole !== undefined, true, 'and keep their card');
+});
+
+run('the room only collapses once the last human is gone', () => {
+  const game = makeGame();
+  game.addPlayer('p1', 's1', 'Host');
+  game.addPlayer('p2', 's2', 'B');
+  game.addPlayer('p3', 's3', 'C');
+  game.startGame('s1');
+  game.clearAllTimers();
+  game.phase = 'night';
+  game.dayCount = 2;
+
+  // Two of the three drop: the game carries on for whoever is left.
+  game.players.find(p => p.id === 'p1').connected = false;
+  game.players.find(p => p.id === 'p2').connected = false;
+  game.retireSeat(game.players.find(p => p.id === 'p1'));
+  game.clearAllTimers();
+  assert.equal(game.phase, 'night');
+  assert.equal(game.dayCount, 2);
+
+  // The last one goes and there is no game left to hold open.
+  game.players.find(p => p.id === 'p3').connected = false;
+  game.retireSeat(game.players.find(p => p.id === 'p3'));
+  game.clearAllTimers();
+  assert.equal(game.phase, 'lobby');
+});
+
+run('the reconnect countdown is published to the table', () => {
+  const game = makeGame();
+  game.addPlayer('p1', 's1', 'Host');
+  game.addPlayer('p2', 's2', 'B');
+  game.addPlayer('p3', 's3', 'C');
+  game.startGame('s1');
+  game.clearAllTimers();
+  game.phase = 'night';
+
+  game.removePlayer('s2');
+  game.clearAllTimers();
+
+  const seen = game.getSanitizedState('s1').players.find(p => p.id === 'p2');
+  assert.equal(seen.connected, false);
+  assert.ok(seen.reconnectDeadline > Date.now(), 'the table should see time remaining');
+
+  const host = game.getSanitizedState('s1').players.find(p => p.id === 'p1');
+  assert.equal(host.reconnectDeadline, null, 'connected players carry no countdown');
+});

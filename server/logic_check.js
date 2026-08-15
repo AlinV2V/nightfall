@@ -1319,3 +1319,287 @@ run('Mystic Wolf is excluded from wolves pool under 7 players', () => {
 
 
 
+
+// ── Night-phase liveness ──────────────────────────────────────────────
+// A reveal result parks the night queue until the player clicks Continue. That
+// wait must always be bounded; it used to clear the phase timer outright, so a
+// closed tab or an AFK player froze the room in the night phase permanently.
+
+run('a pending reveal always leaves a bounded timer armed', () => {
+  const game = makeGame();
+  seatPlayers(game, ['Seer', 'Villager', 'Werewolf']);
+  game.phase = 'night';
+  game.currentNightAction = 'Seer';
+  game.currentNightActors = ['p1'];
+
+  game.handleNightAction('s1', { type: 'player', target1: 'p2' });
+
+  assert.equal(game.pendingNightResultAcks.p1.type, 'seerFactionResult');
+  assert.notEqual(game.timer, null);
+  assert.ok(game.phaseEndsAt > Date.now(), 'review window should carry a deadline');
+  game.clearAllTimers();
+});
+
+run('the review window force-resolves instead of stalling the night', () => {
+  const game = makeGame();
+  seatPlayers(game, ['Seer', 'Villager', 'Werewolf']);
+  game.phase = 'night';
+  game.currentNightAction = 'Seer';
+  game.currentNightActors = ['p1'];
+  game.nightQueue = [];
+
+  game.handleNightAction('s1', { type: 'player', target1: 'p2' });
+  assert.equal(game.pendingNightResultAcks.p1 !== undefined, true);
+
+  game.forceResolveNightReview();
+  game.clearAllTimers();
+
+  assert.equal(game.pendingNightResultAcks.p1, undefined);
+  assert.equal(game.nightActionsReceived.p1, true);
+  assert.equal(game.phase, 'day', 'an empty queue after review should break for dawn');
+});
+
+run('a player who leaves mid-reveal releases their hold on the night', () => {
+  const game = makeGame();
+  seatPlayers(game, ['Seer', 'Villager', 'Werewolf']);
+  game.phase = 'night';
+  game.currentNightAction = 'Seer';
+  game.currentNightActors = ['p1'];
+
+  game.handleNightAction('s1', { type: 'player', target1: 'p2' });
+  assert.equal(game.hasPendingNightResultAck('p1'), true);
+
+  game.players[0].connected = false;
+  assert.equal(game.releaseNightHold('p1'), true);
+  game.clearAllTimers();
+
+  assert.equal(game.hasPendingNightResultAck('p1'), false);
+  assert.equal(game.nightActionsReceived.p1, true);
+});
+
+run('disconnected actors do not hold the "everyone acted" check open', () => {
+  const game = makeGame();
+  seatPlayers(game, ['Werewolf', 'Werewolf', 'Villager', 'Villager']);
+  game.phase = 'night';
+  game.currentNightAction = 'Werewolf';
+  game.currentNightActors = ['p1', 'p2'];
+
+  // p2 drops after the actor list was snapshotted at wake time.
+  game.players[1].connected = false;
+  assert.deepEqual(game.getPendingNightActors(), ['p1']);
+
+  game.nightActionsReceived.p1 = true;
+  assert.deepEqual(game.getPendingNightActors(), []);
+  game.clearAllTimers();
+});
+
+run('host can end the night early and the wake queue is abandoned', () => {
+  const game = makeGame();
+  seatPlayers(game, ['Seer', 'Villager', 'Werewolf']);
+  game.phase = 'night';
+  game.currentNightAction = 'Seer';
+  game.currentNightActors = ['p1'];
+  game.nightQueue = ['Werewolf'];
+  game.pendingNightResultAcks = { p1: { role: 'Seer', type: 'seerFactionResult', ts: Date.now() } };
+
+  // Non-hosts cannot force dawn.
+  assert.equal(game.skipNight('s2'), false);
+  assert.equal(game.phase, 'night');
+
+  assert.equal(game.skipNight('s1'), true);
+  game.clearAllTimers();
+
+  assert.equal(game.phase, 'day');
+  assert.deepEqual(game.nightQueue, []);
+  assert.deepEqual(game.pendingNightResultAcks, {});
+});
+
+// ── State lifecycle ───────────────────────────────────────────────────
+// Every per-game field is cleared in one place. This guards the drift that let
+// newer role state survive a reset because only some of the paths knew about it.
+
+function assertGameStateClean(game, label) {
+  const emptyMaps = [
+    'assignments', 'revealedCards', 'cupidLinks', 'vampireMarks', 'accusationCounts',
+    'dawnBringerUsed', 'yanderObs', 'yandereUsed', 'disruptorTarget', 'reflectorTarget',
+    'yandereActiveShield', 'cthulhuCrazed', 'wwKillVotes', 'nightActionsReceived',
+    'pendingNightResultAcks', 'accusationVotes', 'trialVotes',
+  ];
+  const emptyLists = [
+    'roles', 'centerCards', 'eventLog', 'nightQueue', 'protectedPlayers',
+    'witchKills', 'troublemakerKills', 'currentNightActors', 'jailerChatMessages',
+  ];
+  const emptySets = [
+    'cultMembers', 'toughGuyHit', 'silencedNextDay', 'banishedNextDay',
+    'jailedTargets', 'witchProtectedTargets',
+  ];
+  const cleared = [
+    'winner', 'accusedId', 'alphaWolfCard', 'cultLeaderId', 'werewolfKillTarget',
+    'sentinelShielded', 'currentNightAction', 'jailedPlayerId', 'jailerActorId',
+    'jailerTargetId', 'jailerChatTimer', 'jailerChatExpiresAt', 'phaseEndsAt',
+  ];
+  const flagsOff = [
+    'jailerChatActive', 'dawnBringerDeclared', 'wolfCubExtraKill',
+    'wolfCubPendingExtraKill', 'wolvesSkipNextNight', 'wolvesSkippingThisNight',
+  ];
+
+  emptyMaps.forEach(f => assert.deepEqual(game[f], {}, `${label}: ${f} should be empty`));
+  emptyLists.forEach(f => assert.deepEqual(game[f], [], `${label}: ${f} should be empty`));
+  emptySets.forEach(f => assert.equal(game[f].size, 0, `${label}: ${f} should be empty`));
+  cleared.forEach(f => assert.equal(game[f], null, `${label}: ${f} should be null`));
+  flagsOff.forEach(f => assert.equal(game[f], false, `${label}: ${f} should be false`));
+  assert.equal(game.bodyguardGuards.size, 0, `${label}: bodyguardGuards should be empty`);
+  assert.equal(game.dayCount, 1, `${label}: dayCount should be 1`);
+}
+
+function dirtyEveryStateField(game) {
+  game.roles = ['Werewolf'];
+  game.centerCards = ['Villager'];
+  game.alphaWolfCard = 'Werewolf';
+  game.revealedCards = { p1: 'Seer' };
+  game.eventLog = ['something happened'];
+  game.dayCount = 4;
+  game.nightQueue = ['Seer'];
+  game.winner = 'Village Wins!';
+  game.phaseEndsAt = Date.now() + 1000;
+  game.cupidLinks = { p1: 'p2' };
+  game.cultMembers = new Set(['p1']);
+  game.cultLeaderId = 'p1';
+  game.vampireMarks = { p2: 'p1' };
+  game.accusationCounts = { p1: 3 };
+  game.toughGuyHit = new Set(['p2']);
+  game.wolfCubExtraKill = true;
+  game.wolfCubPendingExtraKill = true;
+  game.wolvesSkipNextNight = true;
+  game.wolvesSkippingThisNight = true;
+  game.dawnBringerUsed = { p1: true };
+  game.dawnBringerDeclared = true;
+  game.yanderObs = { p1: 'p2' };
+  game.yandereUsed = { p1: 2 };
+  game.yandereActiveShield = { p1: 'p2' };
+  game.disruptorTarget = { p1: 'p2' };
+  game.reflectorTarget = { p1: 'p2' };
+  game.cthulhuCrazed = { p2: 'fhtagn' };
+  game.silencedNextDay = new Set(['p2']);
+  game.banishedNextDay = new Set(['p3']);
+  game.wwKillVotes = { p1: 'p2' };
+  game.werewolfKillTarget = 'p2';
+  game.protectedPlayers = ['p3'];
+  game.bodyguardGuards = new Map([['p1', 'p2']]);
+  game.jailedTargets = new Set(['p2']);
+  game.jailedPlayerId = 'p2';
+  game.jailerChatActive = true;
+  game.jailerActorId = 'p1';
+  game.jailerTargetId = 'p2';
+  game.jailerChatMessages = [{ sender: 'p1', text: 'hi' }];
+  game.jailerChatExpiresAt = Date.now() + 1000;
+  game.sentinelShielded = 'p3';
+  game.witchKills = ['p2'];
+  game.witchProtectedTargets = new Set(['p3']);
+  game.troublemakerKills = ['p2'];
+  game.nightActionsReceived = { p1: true };
+  game.pendingNightResultAcks = { p1: { type: 'seerFactionResult' } };
+  game.currentNightAction = 'Seer';
+  game.currentNightActors = ['p1'];
+  game.accusationVotes = { p1: 'p2' };
+  game.trialVotes = { p1: 'eliminate' };
+  game.accusedId = 'p2';
+}
+
+run('a fresh engine starts with fully clean game state', () => {
+  assertGameStateClean(makeGame(), 'constructor');
+});
+
+run('play again clears every field from the previous game', () => {
+  const game = makeGame();
+  game.addPlayer('p1', 's1', 'A');
+  game.addPlayer('p2', 's2', 'B');
+  game.addPlayer('p3', 's3', 'C');
+  game.phase = 'end';
+  dirtyEveryStateField(game);
+
+  assert.equal(game.startGame('s1'), true);
+  game.clearAllTimers();
+
+  // Fields the new game legitimately populates are checked separately.
+  assert.equal(game.dayCount, 1);
+  assert.equal(game.winner, null);
+  assert.equal(game.accusedId, null);
+  assert.deepEqual(game.accusationVotes, {});
+  assert.deepEqual(game.trialVotes, {});
+  assert.deepEqual(game.cthulhuCrazed, {});
+  assert.deepEqual(game.disruptorTarget, {});
+  assert.deepEqual(game.reflectorTarget, {});
+  assert.deepEqual(game.yanderObs, {});
+  assert.deepEqual(game.dawnBringerUsed, {});
+  assert.equal(game.dawnBringerDeclared, false);
+  assert.equal(game.wolfCubExtraKill, false);
+  assert.equal(game.wolvesSkipNextNight, false);
+  assert.equal(game.jailerChatActive, false);
+  assert.equal(game.jailedPlayerId, null);
+  assert.equal(game.werewolfKillTarget, null);
+  assert.equal(game.silencedNextDay.size, 0);
+  assert.equal(game.banishedNextDay.size, 0);
+  assert.equal(game.toughGuyHit.size, 0);
+  assert.deepEqual(game.witchKills, []);
+});
+
+run('a collapsed session resets the same fields a fresh game does', () => {
+  const game = makeGame();
+  game.addPlayer('p1', 's1', 'Host');
+  game.addPlayer('p2', 's2', 'B');
+  dirtyEveryStateField(game);
+
+  game.endSessionBecauseHostLeft('p1');
+  game.clearAllTimers();
+
+  assert.equal(game.phase, 'lobby');
+  // The reset runs first, then the session-end notice is logged for the lobby.
+  assert.equal(game.eventLog.length, 1);
+  game.eventLog = [];
+  assertGameStateClean(game, 'host-leave');
+});
+
+// ── Timers and state hygiene ──────────────────────────────────────────
+
+run('phase timers are anchored to a wall-clock deadline', () => {
+  const game = makeGame();
+  seatPlayers(game, ['Seer', 'Villager', 'Werewolf']);
+  game.phase = 'day';
+
+  const before = Date.now();
+  game.startPhaseTimer(30, () => {});
+  assert.equal(game.timeLeft, 30);
+  assert.ok(game.phaseEndsAt >= before + 30000, 'deadline should be 30s out');
+  assert.ok(game.phaseEndsAt <= Date.now() + 30000);
+  game.clearAllTimers();
+});
+
+run('accused id is withheld outside the phases where it applies', () => {
+  const game = makeGame();
+  seatPlayers(game, ['Seer', 'Villager', 'Werewolf']);
+  game.accusedId = 'p2';
+
+  game.phase = 'night';
+  assert.equal(game.getSanitizedState('s1').accusedId, null);
+  game.phase = 'day';
+  assert.equal(game.getSanitizedState('s1').accusedId, null);
+
+  game.phase = 'defense';
+  assert.equal(game.getSanitizedState('s1').accusedId, 'p2');
+  game.phase = 'trial';
+  assert.equal(game.getSanitizedState('s1').accusedId, 'p2');
+  game.clearAllTimers();
+});
+
+run('broadcast state does not leak socket handles', () => {
+  const game = makeGame();
+  seatPlayers(game, ['Seer', 'Villager', 'Werewolf']);
+  game.phase = 'day';
+
+  const state = game.getSanitizedState('s1');
+  state.players.forEach((p) => {
+    assert.equal('socketId' in p, false, 'player payload should not carry socketId');
+  });
+  game.clearAllTimers();
+});

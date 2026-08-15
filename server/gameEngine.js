@@ -190,6 +190,15 @@ const clampNumber = (value, fallback, min, max) => {
   return Math.min(max, Math.max(min, parsed));
 };
 
+// A player reading a reveal result holds the night queue open until they hit
+// Continue. That wait is generous but must always be bounded — otherwise a
+// closed tab or an AFK player freezes the whole room in the night phase.
+const NIGHT_REVIEW_GRACE_MS = 25000;
+
+// Phases in which an accusation is live. Outside these the accused id is stale
+// bookkeeping and is withheld from the client.
+const ACCUSED_VISIBLE_PHASES = new Set(['accusation', 'defense', 'trial', 'end']);
+
 class GameEngine {
   constructor(roomId, roomIo, rawIo) {
     this.roomId = roomId;
@@ -197,12 +206,6 @@ class GameEngine {
     this.rawIo = rawIo;
     this.players = [];
     this.phase = 'lobby';
-    this.roles = [];
-    this.assignments = {};
-    this.centerCards = [];
-    this.alphaWolfCard = null;
-    this.revealedCards = {};
-    this.eventLog = [];
 
     this.settings = {
       enableVillagerChat: false,
@@ -217,41 +220,48 @@ class GameEngine {
       deck: [],
     };
 
-    this.dayCount = 1;
-    this.nightQueue = [];
+    this.timer = null;
+    this.dealTimer = null;
+    this.locked = false;
+
+    // ── Bot infrastructure (host-only test mode) ──
+    this.botCounter = 0;
+    this.botTimers = new Set();
+    this.botDebugLog = []; // [{ time, bot, role, action, detail }]
+    this.botDebugMax = 200;
+
+    this.resetGameState();
+  }
+
+  // ──────────────────────────────────────────────────────────
+  // STATE LIFECYCLE
+  //
+  // Every field scoped to a night, a day, or a game is declared and cleared in
+  // exactly one place below. New roles add their field to the matching reset and
+  // are then correct everywhere — the constructor, "play again", and a session
+  // collapsing back to the lobby all funnel through these.
+  // ──────────────────────────────────────────────────────────
+
+  // Cleared at the start of every night.
+  resetNightState() {
     this.currentNightAction = null;
     this.currentNightActors = [];
+    this.nightActionsReceived = {};
+    this.pendingNightResultAcks = {};
     this.wwKillVotes = {};
+    this.werewolfKillTarget = null;
     this.protectedPlayers = [];
     this.bodyguardGuards = new Map();
     this.jailedTargets = new Set();
     this.sentinelShielded = null;
-    this.nightActionsReceived = {};
-    this.pendingNightResultAcks = {};
-
-    // ── GPT-Roles state ──
-    this.silencedNextDay = new Set();    // Spellcaster targets — cannot speak day chat
-    this.banishedNextDay = new Set();    // Old Hag targets — cannot speak/vote
-    this.cupidLinks = {};                 // {playerId -> partnerId}
-    this.cultMembers = new Set();         // Cult Leader cult roster
-    this.cultLeaderId = null;             // Tracked for cult-win check
-    this.vampireMarks = {};               // {markedTargetId -> vampireId} (active mark)
-    this.accusationCounts = {};           // {playerId -> total accusations received}
-    this.toughGuyHit = new Set();         // Tough Guys who took a wolf hit (die next night)
-    this.wolfCubExtraKill = false;        // Set when Wolf Cub eliminated; doubles next wolf kill
-    this.wolfCubPendingExtraKill = false; // Set when Wolf Cub dies; promotes to extra kill at next night start
-    this.wolvesSkipNextNight = false;     // Set when Diseased dies to wolves
-    this.wolvesSkippingThisNight = false; // Active wolves skip status for current night
-    // Ghost-chat is now a death-conferred ability for any player — no per-deck flag.
-    // ── New role state ──
-    this.dawnBringerUsed = {};            // {pid: bool} — Dawn Bringer declaration used
-    this.dawnBringerDeclared = false;     // True when Dawn Bringer cancelled next night
-    this.disruptorTarget = {};            // {pid: targetId} — per night Disruptor target
-    this.reflectorTarget = {};            // {pid: targetId} — The Reflector mirror target
-    this.yanderObs = {};                  // {pid: obsId} — Yandere obsession target
-    this.yandereUsed = {};                // {pid: uses} — remaining activations (max 3)
-    this.yandereActiveShield = {};        // {pid: obsId} — active shield this night
-    this.cthulhuCrazed = {};             // {targetId: word} — crazed players and their forced word
+    this.witchKills = [];
+    this.witchProtectedTargets = new Set();
+    this.troublemakerKills = [];
+    this.disruptorTarget = {};   // {pid: targetId} — per night Disruptor target
+    this.reflectorTarget = {};   // {pid: targetId} — The Reflector mirror target
+    this.yandereActiveShield = {}; // {pid: obsId} — active shield this night
+    // Cthulhu madness carries night → day, then resets at the next nightfall.
+    this.cthulhuCrazed = {};     // {targetId: word} — crazed players and their forced word
 
     // ── Jailer chat state ──
     this.jailerChatActive = false;
@@ -259,24 +269,60 @@ class GameEngine {
     this.jailerTargetId = null;
     this.jailerChatMessages = [];
     this.jailerChatExpiresAt = null;
-    this.jailerChatTimer = null;
     this.jailedPlayerId = null;
+    if (this.jailerChatTimer) {
+      clearTimeout(this.jailerChatTimer);
+    }
+    this.jailerChatTimer = null;
+  }
 
-    this.timer = null;
-    this.dealTimer = null;
-    this.timeLeft = 0;
+  // Day-long carry-overs. These are applied during the day they were set and
+  // expire at the following nightfall, so they clear alongside the night reset.
+  resetDayState() {
+    this.silencedNextDay = new Set(); // Spellcaster targets — cannot speak day chat
+    this.banishedNextDay = new Set(); // Old Hag targets — cannot speak or vote
+  }
+
+  // Vote bookkeeping for one day/trial cycle.
+  resetVoteState() {
     this.accusationVotes = {};
     this.trialVotes = {};
     this.accusedId = null;
-    this.winner = null;
-    this.locked = false;
-    this.werewolfKillTarget = null;
+  }
 
-    // ── Bot infrastructure (host-only test mode) ──
-    this.botCounter = 0;
-    this.botTimers = new Set();
-    this.botDebugLog = []; // [{ time, bot, role, action, detail }]
-    this.botDebugMax = 200;
+  // Full per-game reset. Leaves identity, seating, settings and bot plumbing alone.
+  resetGameState() {
+    this.roles = [];
+    this.assignments = {};
+    this.centerCards = [];
+    this.alphaWolfCard = null;
+    this.revealedCards = {};
+    this.eventLog = [];
+    this.dayCount = 1;
+    this.nightQueue = [];
+    this.timeLeft = 0;
+    this.phaseEndsAt = null;
+    this.winner = null;
+
+    this.cupidLinks = {};                 // {playerId -> partnerId}
+    this.cultMembers = new Set();         // Cult Leader cult roster
+    this.cultLeaderId = null;             // Tracked for cult-win check
+    this.vampireMarks = {};               // {markedTargetId -> vampireId} (active mark)
+    this.accusationCounts = {};           // {playerId -> total accusations received}
+    this.toughGuyHit = new Set();         // Tough Guys who took a wolf hit (die next night)
+    this.wolfCubExtraKill = false;        // Set when Wolf Cub eliminated; doubles next wolf kill
+    this.wolfCubPendingExtraKill = false; // Set when Wolf Cub dies; promotes at next night start
+    this.wolvesSkipNextNight = false;     // Set when Diseased dies to wolves
+    this.wolvesSkippingThisNight = false; // Active wolves skip status for current night
+    this.dawnBringerUsed = {};            // {pid: bool} — Dawn Bringer declaration used
+    this.dawnBringerDeclared = false;     // True when Dawn Bringer cancelled next night
+    this.yanderObs = {};                  // {pid: obsId} — Yandere obsession target
+    this.yandereUsed = {};                // {pid: uses} — activations spent (max 3)
+    // Ghost-chat is a death-conferred ability for any player — no per-deck flag.
+
+    this.resetNightState();
+    this.resetDayState();
+    this.resetVoteState();
   }
 
   // ──────────────────────────────────────────────────────────
@@ -411,42 +457,8 @@ class GameEngine {
 
     this.phase = 'lobby';
     this.locked = false;
-    this.werewolfKillTarget = null;
-    this.roles = [];
-    this.assignments = {};
-    this.centerCards = [];
-    this.alphaWolfCard = null;
-    this.revealedCards = {};
-    this.eventLog = [];
-    this.dayCount = 1;
-    this.nightQueue = [];
-    this.currentNightAction = null;
-    this.currentNightActors = [];
-    this.wwKillVotes = {};
-    this.protectedPlayers = [];
-    this.bodyguardGuards = new Map();
-    this.jailedTargets = new Set();
-    this.sentinelShielded = null;
-    this.nightActionsReceived = {};
-    this.pendingNightResultAcks = {};
-    this.timeLeft = 0;
-    this.accusationVotes = {};
-    this.trialVotes = {};
-    this.accusedId = null;
-    this.winner = null;
     this.botCounter = 0;
-    this.silencedNextDay = new Set();
-    this.banishedNextDay = new Set();
-    this.cupidLinks = {};
-    this.cultMembers = new Set();
-    this.cultLeaderId = null;
-    this.vampireMarks = {};
-    this.accusationCounts = {};
-    this.toughGuyHit = new Set();
-    this.wolfCubExtraKill = false;
-    this.wolfCubPendingExtraKill = false;
-    this.wolvesSkipNextNight = false;
-    this.wolvesSkippingThisNight = false;
+    this.resetGameState();
 
     this.logBotEvent('System', 'HostLeave', 'session_end',
       `Host left; removed ${removedBots} bot${removedBots === 1 ? '' : 's'} and reset to lobby.`);
@@ -727,6 +739,58 @@ class GameEngine {
     return !!(playerId && this.pendingNightResultAcks[playerId]);
   }
 
+  // A night actor can only be waited on while they are able to answer. Bots always
+  // can; humans stop counting the moment they drop.
+  isNightActorResponsive(playerId) {
+    const p = this.players.find(x => x.id === playerId);
+    return !!(p && (p.connected || p.isBot));
+  }
+
+  // The set of actors the current night phase is still legitimately waiting on.
+  getPendingNightActors() {
+    const actors = this.currentNightActors.length > 0
+      ? this.currentNightActors
+      : this.getActiveActors(this.currentNightAction);
+    return actors.filter(id => !this.nightActionsReceived[id] && this.isNightActorResponsive(id));
+  }
+
+  // Bounded window for reviewing a reveal result before the night moves on itself.
+  armNightReviewTimer() {
+    this.clearTimer();
+    if (this.phase !== 'night') return;
+    this.timeLeft = Math.ceil(NIGHT_REVIEW_GRACE_MS / 1000);
+    this.phaseEndsAt = Date.now() + NIGHT_REVIEW_GRACE_MS;
+    this.timer = setTimeout(() => this.forceResolveNightReview(), NIGHT_REVIEW_GRACE_MS);
+  }
+
+  // Review window expired: auto-acknowledge everything still outstanding and advance.
+  forceResolveNightReview() {
+    if (this.phase !== 'night') return;
+    Object.keys(this.pendingNightResultAcks).forEach((pid) => {
+      delete this.pendingNightResultAcks[pid];
+      this.nightActionsReceived[pid] = true;
+      this.logBotEvent(this.getPlayerName(pid) || pid, this.currentNightAction, 'auto-continue',
+        'Review window expired; the night advanced on its own.');
+    });
+    this.clearTimer();
+    this.nextNightAction();
+  }
+
+  // A player left mid-review. Release the hold they have on the night queue so the
+  // room keeps moving, and advance immediately if they were the last one pending.
+  releaseNightHold(playerId) {
+    if (this.phase !== 'night' || !this.hasPendingNightResultAck(playerId)) return false;
+    delete this.pendingNightResultAcks[playerId];
+    this.nightActionsReceived[playerId] = true;
+    this.logBotEvent(this.getPlayerName(playerId) || playerId, this.currentNightAction,
+      'released', 'Left while reviewing; night hold released.');
+    if (this.getPendingNightActors().length === 0) {
+      this.clearTimer();
+      this.timer = setTimeout(() => this.nextNightAction(), 500);
+    }
+    return true;
+  }
+
   shouldWaitForNightResultAck(actor, payload) {
     return !!(
       actor
@@ -761,7 +825,10 @@ class GameEngine {
         type: payload.type,
         ts: Date.now(),
       };
-      this.clearTimer();
+      // Swap the phase timer for a bounded review window rather than dropping the
+      // timer entirely — the night must never depend solely on a click that may
+      // never arrive.
+      this.armNightReviewTimer();
       this.scheduleBotNightResultAck(actor.id);
     }
 
@@ -846,7 +913,30 @@ class GameEngine {
   }
 
   emitTick() {
-    this.emitToRoom('phaseTick', { phase: this.phase, timeLeft: this.timeLeft });
+    this.emitToRoom('phaseTick', {
+      phase: this.phase,
+      timeLeft: this.timeLeft,
+      phaseEndsAt: this.phaseEndsAt,
+    });
+  }
+
+  // Phase countdowns are anchored to a wall-clock deadline rather than accumulated
+  // from a per-second decrement, so a stalled event loop or a slow tick can't
+  // silently stretch a phase past its configured length.
+  startPhaseTimer(seconds, onExpire) {
+    this.clearTimer();
+    this.timeLeft = seconds;
+    this.phaseEndsAt = Date.now() + seconds * 1000;
+    this.timer = setInterval(() => {
+      const remaining = Math.max(0, Math.ceil((this.phaseEndsAt - Date.now()) / 1000));
+      const changed = remaining !== this.timeLeft;
+      this.timeLeft = remaining;
+      if (changed) this.emitTick();
+      if (remaining <= 0) {
+        this.clearTimer();
+        onExpire();
+      }
+    }, 250);
   }
 
   logEvent(text) {
@@ -1302,6 +1392,8 @@ class GameEngine {
             this.endSessionBecauseHostLeft(p.id);
             return;
           }
+          // Never let a departed player's unread reveal hold the night queue open.
+          this.releaseNightHold(p.id);
           if (this.phase === 'lobby') {
             this.players = this.players.filter(x => x.id !== p.id);
           }
@@ -1510,7 +1602,8 @@ class GameEngine {
       isJailerChatParticipant,
       players: this.players.map(p => ({
         id: p.id,
-        socketId: p.socketId,
+        // Deliberately no socketId — clients address each other by player id, and
+        // broadcasting connection handles is needless surface.
         name: p.name,
         isHost: p.isHost,
         connected: p.connected,
@@ -1576,7 +1669,9 @@ class GameEngine {
       wwKillVotes: isWerewolfTurn ? this.wwKillVotes : {},
       nightProgress,
       voteProgress,
-      accusedId: this.accusedId,
+      // Only meaningful while someone is actually on trial; gating it keeps a
+      // finished day's accusation from leaking into the next night's state.
+      accusedId: ACCUSED_VISIBLE_PHASES.has(this.phase) ? this.accusedId : null,
       myAccusationVote,
       myTrialVote,
       trialTally,
@@ -1772,6 +1867,8 @@ class GameEngine {
     this.clearAllTimers();
     this.players = seatedPlayers;
     const n = this.players.length;
+    // Deck validation happens before the reset so a rejected start leaves the
+    // previous game's end screen intact.
     const normalizedDeck = this.normalizeDeck(n);
     if (!normalizedDeck) {
       const message = this.settings.deckPreset === 'alin'
@@ -1784,9 +1881,9 @@ class GameEngine {
       });
       return false;
     }
+    this.resetGameState();
     this.roles = normalizedDeck;
 
-    this.assignments = {};
     for (let i = 0; i < n; i++) {
       const role = this.roles[i];
       this.assignments[this.players[i].id] = {
@@ -1807,38 +1904,10 @@ class GameEngine {
 
     this.centerCards = [this.roles[n], this.roles[n + 1], this.roles[n + 2]];
     this.alphaWolfCard = this.roles.includes('Alpha Wolf') ? 'Werewolf' : null;
-    this.revealedCards = {};
-    this.eventLog = [];
-    this.dayCount = 1;
-    this.winner = null;
-    this.nightActionsReceived = {};
-    this.pendingNightResultAcks = {};
-    this.currentNightActors = [];
-    this.currentNightAction = null;
-    this.silencedNextDay = new Set();
-    this.banishedNextDay = new Set();
-    this.cupidLinks = {};
-    this.cultMembers = new Set();
+    // The cult opens with its leader already inside it.
     this.cultLeaderId = this.players.find(p => this.assignments[p.id]?.originalRole === 'Cult Leader')?.id || null;
     if (this.cultLeaderId) this.cultMembers.add(this.cultLeaderId);
-    this.vampireMarks = {};
-    this.accusationCounts = {};
-    this.toughGuyHit = new Set();
-    this.wolfCubExtraKill = false;
-    this.wolfCubPendingExtraKill = false;
-    this.wolvesSkipNextNight = false;
-    this.wolvesSkippingThisNight = false;
-    this.dawnBringerUsed = {};
-    this.dawnBringerDeclared = false;
-    this.yanderObs = {};
-    this.yandereUsed = {};
-    this.yandereActiveShield = {};
-    this.disruptorTarget = {};
-    this.reflectorTarget = {};
-    this.cthulhuCrazed = {};
 
-    // Ghost is no longer a starting role. Any player who dies during the game gains
-    // the ghost-chat ability automatically — see canUseGhostChat() below.
     this.phase = 'dealing';
     this.broadcastState();
     this.dealTimer = setTimeout(() => this.startNight(), 5000);
@@ -1849,31 +1918,9 @@ class GameEngine {
   startNight() {
     this.clearAllTimers();
     this.phase = 'night';
-    this.wwKillVotes = {};
-    this.protectedPlayers = [];
-    this.bodyguardGuards = new Map();
-    this.jailedTargets = new Set();
-    this.jailedPlayerId = null;
-    this.jailerChatActive = false;
-    this.jailerActorId = null;
-    this.jailerTargetId = null;
-    this.jailerChatMessages = [];
-    this.jailerChatExpiresAt = null;
-    if (this.jailerChatTimer) {
-      clearTimeout(this.jailerChatTimer);
-      this.jailerChatTimer = null;
-    }
-    this.sentinelShielded = null;
-    this.nightActionsReceived = {};
-    this.pendingNightResultAcks = {};
-    this.currentNightActors = [];
-    this.currentNightAction = null;
-    this.witchKills = [];
-    this.witchProtectedTargets = new Set();
-    this.troublemakerKills = [];
-    // Day-status carry-overs cleared at nightfall (Spellcaster/Old Hag last only one day).
-    this.silencedNextDay = new Set();
-    this.banishedNextDay = new Set();
+    this.resetNightState();
+    // Day-status carry-overs expire at nightfall (Spellcaster/Old Hag last one day).
+    this.resetDayState();
 
     // Diseased skip reset
     this.wolvesSkippingThisNight = this.wolvesSkipNextNight;
@@ -1885,12 +1932,6 @@ class GameEngine {
       this.wolfCubPendingExtraKill = false;
     }
 
-    // Reset per-night Disruptor and Reflector targets
-    this.disruptorTarget = {};
-    this.reflectorTarget = {};
-    this.yandereActiveShield = {};
-    // Cthulhu madness carries over from night \u2192 day, but resets at the next night start
-    this.cthulhuCrazed = {};
     // NOTE: dawnBringerDeclared is intentionally NOT cleared here \u2014 it must survive into
     // the dawn-bringer skip check below so the night can be cancelled. It is consumed by
     // the skip logic right after Tough Guy resolution.
@@ -2035,17 +2076,20 @@ class GameEngine {
         const actorList = actors.map(id => this.getPlayerName(id)).join(', ');
         this.logBotEvent('System', this.currentNightAction, 'wake',
           `Active: [${actorList}]`);
-        this.broadcastState();
         const killPhase = this.currentNightAction === 'Werewolf' && this.shouldWerewolvesHuntNow();
         const seconds = killPhase ? this.settings.nightActionTime + 10 : this.settings.nightActionTime;
-        this.timer = setTimeout(() => {
+        // Armed before the broadcast so the state players receive already carries
+        // this wake's deadline.
+        this.startPhaseTimer(seconds, () => {
           const waitingForReview = this.currentNightActors.some(id => this.hasPendingNightResultAck(id));
           if (waitingForReview) {
-            this.clearTimer();
+            // Give readers a bounded extension rather than cutting them off mid-result.
+            this.armNightReviewTimer();
             return;
           }
           this.nextNightAction();
-        }, seconds * 1000);
+        });
+        this.broadcastState();
         // Bots auto-act after a short, staggered delay so the host can see them on the log.
         this.scheduleBotNightActions();
         return;
@@ -2064,7 +2108,9 @@ class GameEngine {
     const actors = this.currentNightActors && this.currentNightActors.length > 0
       ? this.currentNightActors
       : this.getActiveActors(this.currentNightAction);
-    if (actors.length > 0 && actors.every(id => this.nightActionsReceived[id])) {
+    // Actors are snapshotted when the phase wakes, so anyone who dropped since then
+    // is skipped instead of holding the "everyone acted" check open.
+    if (actors.length > 0 && this.getPendingNightActors().length === 0) {
       this.clearTimer();
       this.timer = setTimeout(() => this.nextNightAction(), 1000);
     }
@@ -3052,14 +3098,7 @@ class GameEngine {
 
     this.broadcastState();
 
-    this.timer = setInterval(() => {
-      this.timeLeft -= 1;
-      this.emitTick();
-      if (this.timeLeft <= 0) {
-        this.clearTimer();
-        this.startAccusation();
-      }
-    }, 1000);
+    this.startPhaseTimer(this.settings.discussionLength, () => this.startAccusation());
   }
 
   skipDay(socketId) {
@@ -3068,6 +3107,21 @@ class GameEngine {
       this.clearTimer();
       this.startAccusation();
     }
+  }
+
+  // Host escape hatch for the night, matching the skip controls the day phases
+  // already have. Abandons the rest of the wake queue and breaks for dawn.
+  skipNight(socketId) {
+    const p = this.players.find(x => x.socketId === socketId);
+    if (!p || !p.isHost || this.phase !== 'night') return false;
+    this.clearTimer();
+    this.pendingNightResultAcks = {};
+    this.nightQueue = [];
+    this.logEvent('The host hastened the dawn.');
+    this.logBotEvent('System', 'Night', 'host-skip',
+      `Host ended night ${this.dayCount} early.`);
+    this.startDay();
+    return true;
   }
 
   // === Phase: accusation ===
@@ -3086,14 +3140,7 @@ class GameEngine {
     this.broadcastState();
     this.scheduleBotAccusations();
 
-    this.timer = setInterval(() => {
-      this.timeLeft -= 1;
-      this.emitTick();
-      if (this.timeLeft <= 0) {
-        this.clearTimer();
-        this.resolveAccusation();
-      }
-    }, 1000);
+    this.startPhaseTimer(this.settings.accusationLength, () => this.resolveAccusation());
   }
 
   handleVote(socketId, targetId) {
@@ -3225,14 +3272,7 @@ class GameEngine {
       `Accused: ${name} | duration: ${this.timeLeft}s`);
     this.broadcastState();
 
-    this.timer = setInterval(() => {
-      this.timeLeft -= 1;
-      this.emitTick();
-      if (this.timeLeft <= 0) {
-        this.clearTimer();
-        this.startTrial();
-      }
-    }, 1000);
+    this.startPhaseTimer(this.settings.defenseLength, () => this.startTrial());
   }
 
   skipDefense(socketId) {
@@ -3275,14 +3315,7 @@ class GameEngine {
     this.broadcastState();
     this.scheduleBotTrialVotes();
 
-    this.timer = setInterval(() => {
-      this.timeLeft -= 1;
-      this.emitTick();
-      if (this.timeLeft <= 0) {
-        this.clearTimer();
-        this.resolveTrial();
-      }
-    }, 1000);
+    this.startPhaseTimer(this.settings.trialLength, () => this.resolveTrial());
   }
 
   getTrialVoters() {

@@ -136,6 +136,13 @@ io.on('connection', (socket) => {
     }
   });
 
+  socket.on('skipNight', () => {
+    const game = rooms[socket.roomId];
+    if (game) {
+      game.skipNight(socket.id);
+    }
+  });
+
   socket.on('submitTrialVote', (choice) => {
     const game = rooms[socket.roomId];
     if (game) {

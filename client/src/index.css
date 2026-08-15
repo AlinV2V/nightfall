@@ -3946,3 +3946,144 @@ h1, h2, h3, h4 {
 @media (prefers-reduced-motion: reduce) {
   .reconnect-pip { animation: none; opacity: 0.9; }
 }
+
+/* ── The Chronicle ───────────────────────────────────────────
+   Post-game timeline. Grouped into acts so it reads as chapters,
+   with night and day acts tinted to match the phases they record.
+   ============================================================ */
+.chronicle {
+  margin-top: 1.6rem;
+  text-align: left;
+}
+
+.chronicle-heading {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  color: var(--amber-glow);
+  letter-spacing: 0.1em;
+  margin-bottom: 4px;
+}
+
+.chronicle-sub {
+  font-family: var(--font-story);
+  font-style: italic;
+  font-size: 0.9rem;
+  color: var(--text-muted);
+  margin-bottom: 14px;
+}
+
+.chronicle-acts {
+  list-style: none;
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+}
+
+/* The rail down the left edge ties the acts into one thread. */
+.chronicle-act {
+  position: relative;
+  padding-left: 16px;
+  border-left: 2px solid var(--chronicle-rail, rgba(212, 148, 58, 0.3));
+}
+
+.chronicle-act.is-night { --chronicle-rail: rgba(140, 170, 255, 0.34); }
+.chronicle-act.is-day   { --chronicle-rail: rgba(212, 148, 58, 0.34); }
+
+.chronicle-act-head {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-family: var(--font-display);
+  font-size: 0.76rem;
+  font-weight: 700;
+  letter-spacing: 0.18em;
+  text-transform: uppercase;
+  color: var(--chronicle-head, var(--amber));
+  margin-bottom: 7px;
+}
+
+.chronicle-act.is-night .chronicle-act-head { --chronicle-head: var(--moon); }
+
+.chronicle-entries {
+  list-style: none;
+  display: flex;
+  flex-direction: column;
+  gap: 7px;
+}
+
+.chronicle-entry {
+  display: flex;
+  align-items: flex-start;
+  gap: 9px;
+  padding: 8px 11px;
+  border-radius: 9px;
+  background: rgba(255, 255, 255, 0.032);
+  border: 1px solid rgba(255, 255, 255, 0.05);
+}
+
+.chronicle-entry-icon {
+  display: inline-flex;
+  flex-shrink: 0;
+  margin-top: 1px;
+  color: var(--chronicle-tone, var(--text-soft));
+}
+
+.chronicle-entry.tone-blood   { --chronicle-tone: var(--crimson-glow); }
+.chronicle-entry.tone-magic   { --chronicle-tone: var(--violet); }
+.chronicle-entry.tone-amber   { --chronicle-tone: var(--amber-glow); }
+.chronicle-entry.tone-green   { --chronicle-tone: var(--emerald-glow); }
+.chronicle-entry.tone-gold    { --chronicle-tone: var(--amber-soft); }
+.chronicle-entry.tone-neutral { --chronicle-tone: var(--moon); }
+
+.chronicle-entry-body {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  min-width: 0;
+}
+
+.chronicle-entry-text {
+  font-size: 0.9rem;
+  color: var(--text-main);
+  line-height: 1.4;
+}
+
+.chronicle-entry-note {
+  font-family: var(--font-story);
+  font-style: italic;
+  font-size: 0.84rem;
+  color: var(--chronicle-tone, var(--text-muted));
+  opacity: 0.85;
+}
+
+/* The opening lineup renders as chips rather than a sentence. */
+.chronicle-lineup {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 5px;
+  margin-top: 4px;
+}
+
+.chronicle-seat {
+  display: inline-flex;
+  align-items: baseline;
+  gap: 5px;
+  padding: 3px 8px;
+  border-radius: 999px;
+  background: rgba(0, 0, 0, 0.34);
+  border: 1px solid rgba(255, 255, 255, 0.07);
+  font-size: 0.76rem;
+  color: var(--text-soft);
+}
+
+.chronicle-seat strong {
+  font-family: var(--font-display);
+  font-size: 0.74rem;
+  letter-spacing: 0.02em;
+}
+
+@media (max-width: 640px) {
+  .chronicle-entry-text { font-size: 0.86rem; }
+  .chronicle-act { padding-left: 12px; }
+}

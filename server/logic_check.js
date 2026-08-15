@@ -1773,3 +1773,160 @@ run('the reconnect countdown is published to the table', () => {
   const host = game.getSanitizedState('s1').players.find(p => p.id === 'p1');
   assert.equal(host.reconnectDeadline, null, 'connected players carry no countdown');
 });
+
+// ── Chronicle ─────────────────────────────────────────────────────────
+// A complete record of what actually happened, including everything hidden at
+// the time. It is the end-screen payoff, so it must never leak mid-game.
+
+run('the chronicle stays sealed until the game is over', () => {
+  const game = makeGame();
+  game.addPlayer('p1', 's1', 'Host');
+  game.addPlayer('p2', 's2', 'B');
+  game.addPlayer('p3', 's3', 'C');
+  game.startGame('s1');
+  game.clearAllTimers();
+
+  assert.ok(game.chronicle.length > 0, 'the opening lineup should be recorded');
+  game.phase = 'night';
+  assert.deepEqual(game.getSanitizedState('s1').chronicle, [], 'sealed while playing');
+
+  game.phase = 'end';
+  assert.ok(game.getSanitizedState('s1').chronicle.length > 0, 'revealed at the end');
+  game.clearAllTimers();
+});
+
+run('the chronicle records deaths with role and cause', () => {
+  const game = makeGame();
+  seatPlayers(game, ['Werewolf', 'Villager', 'Seer', 'Villager']);
+  game.phase = 'night';
+  game.chronicle = [];
+
+  game.markPlayerDead('p2', new Set(), 'wolves');
+  const death = game.chronicle.find(e => e.type === 'death');
+  assert.equal(death.playerId, 'p2');
+  assert.equal(death.role, 'Villager');
+  assert.equal(death.cause, 'wolves');
+  assert.equal(death.day, 1);
+  assert.ok(death.text.includes('Villager'), 'the entry should name the role');
+  game.clearAllTimers();
+});
+
+run('the chronicle records transformations', () => {
+  const game = makeGame();
+  seatPlayers(game, ['Cursed', 'Villager', 'Werewolf']);
+  game.phase = 'night';
+  game.chronicle = [];
+
+  game.applyRoleChange('p1', 'Werewolf');
+  const change = game.chronicle.find(e => e.type === 'transform');
+  assert.equal(change.from, 'Cursed');
+  assert.equal(change.to, 'Werewolf');
+
+  // A no-op role change is not a story beat.
+  const before = game.chronicle.length;
+  game.applyRoleChange('p1', 'Werewolf');
+  assert.equal(game.chronicle.length, before);
+  game.clearAllTimers();
+});
+
+run('a full round writes an ordered story into the chronicle', () => {
+  const game = makeGame();
+  seatPlayers(game, ['Werewolf', 'Villager', 'Seer', 'Villager', 'Villager']);
+  game.phase = 'accusation';
+  game.dayCount = 2;
+  game.chronicle = [];
+
+  game.accusationVotes = { p1: 'p3', p2: 'p3', p3: 'p1' };
+  game.resolveAccusation();
+  game.clearAllTimers();
+
+  const accusation = game.chronicle.find(e => e.type === 'accusation');
+  assert.equal(accusation.playerId, 'p3');
+  assert.equal(accusation.votes, 2);
+  assert.equal(accusation.day, 2);
+
+  game.phase = 'trial';
+  game.accusedId = 'p3';
+  game.trialVotes = { p1: 'eliminate', p2: 'eliminate', p4: 'save' };
+  game.resolveTrial();
+  game.clearAllTimers();
+
+  const verdict = game.chronicle.find(e => e.type === 'verdict');
+  assert.equal(verdict.eliminate, 2);
+  assert.equal(verdict.save, 1);
+
+  // Entries must come out in the order they happened.
+  const order = game.chronicle.map(e => e.ts);
+  assert.deepEqual(order, [...order].sort((a, b) => a - b));
+});
+
+run('a second Force Verdict cannot cancel an execution already under way', () => {
+  const game = makeGame();
+  seatPlayers(game, ['Werewolf', 'Villager', 'Seer', 'Villager', 'Villager']);
+  game.phase = 'trial';
+  game.accusedId = 'p3';
+  game.trialVotes = { p1: 'eliminate', p2: 'eliminate', p4: 'save' };
+
+  game.resolveTrial();
+  assert.equal(game.executionPending, true, 'the execution should latch');
+  const pendingTimer = game.timer;
+  assert.notEqual(pendingTimer, null, 'the kill is deferred behind the scene');
+
+  // The host mashes the button while the animation plays.
+  game.skipTrial('s1');
+  game.skipTrial('s1');
+  game.resolveTrial();
+
+  assert.equal(game.executionPending, true);
+  assert.equal(game.timer, pendingTimer, 'the pending kill must not be restarted');
+  assert.equal(game.accusedId, 'p3', 'and the verdict must still stand');
+  game.clearAllTimers();
+});
+
+run('host skips during the walk to nightfall cannot restart the trial', () => {
+  const game = makeGame();
+  seatPlayers(game, ['Werewolf', 'Villager', 'Seer', 'Villager', 'Villager']);
+  game.phase = 'trial';
+  game.accusedId = 'p3';
+  game.trialVotes = { p1: 'eliminate', p2: 'eliminate', p4: 'save' };
+
+  game.resolveTrial();
+  // Run the deferred execution by hand, as the scene timer would.
+  game.clearTimer();
+  game.markPlayerDead('p3', new Set(), 'vote');
+  game.accusedId = null;
+  game.advanceToNight();
+  const dayAfterOneTrial = game.dayCount;
+
+  // The phase still reads 'trial' during the three-second walk to night, so a
+  // host mashing Force Verdict here used to loop the day counter forever.
+  game.skipTrial('s1');
+  game.skipTrial('s1');
+  game.skipTrial('s1');
+
+  assert.equal(game.dayCount, dayAfterOneTrial, 'the day must only advance once');
+  assert.equal(game.executionPending, true, 'the verdict stays latched until night');
+
+  game.startNight();
+  assert.equal(game.executionPending, false, 'and clears when the night begins');
+  game.clearAllTimers();
+});
+
+run('dawn deaths are filed under the night that caused them', () => {
+  const game = makeGame();
+  seatPlayers(game, ['Werewolf', 'Villager', 'Seer', 'Villager']);
+  game.phase = 'day';
+  game.dayCount = 2;
+  game.chronicle = [];
+
+  // A body found at sunrise belongs to the night, not the morning.
+  game.chronicleAct = 'night';
+  game.markPlayerDead('p2', new Set(), 'wolves');
+  game.chronicleAct = null;
+  game.markPlayerDead('p4', new Set(), 'vote');
+
+  const [nightDeath, dayDeath] = game.chronicle.filter(e => e.type === 'death');
+  assert.equal(nightDeath.phase, 'night');
+  assert.equal(dayDeath.phase, 'day');
+  game.clearAllTimers();
+});

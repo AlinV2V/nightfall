@@ -300,6 +300,12 @@ class GameEngine {
     this.accusationVotes = {};
     this.trialVotes = {};
     this.accusedId = null;
+    // Latched from the moment a verdict commits until the next phase actually
+    // begins. The phase reads 'trial' for that entire stretch — through the
+    // execution scene and the three-second walk to nightfall — so without this
+    // a second Force Verdict re-enters and cancels the transition, leaving the
+    // game looping on a trial whose accused is already gone.
+    this.executionPending = false;
   }
 
   // Full per-game reset. Leaves identity, seating, settings and bot plumbing alone.
@@ -312,6 +318,8 @@ class GameEngine {
     this.eventLog = [];
     this.dayCount = 1;
     this.nightQueue = [];
+    this.chronicle = [];
+    this.chronicleAct = null;
     this.timeLeft = 0;
     this.phaseEndsAt = null;
     this.phaseDuration = 0;
@@ -975,6 +983,34 @@ class GameEngine {
     this.emitToRoom('chatMessage', message);
   }
 
+  // ── Chronicle ──────────────────────────────────────────────
+  // The town crier feed is a rolling 40-line window built for playing: it says
+  // only what the village is allowed to know, and it scrolls away. The chronicle
+  // is its opposite — a complete ordered record, including everything hidden at
+  // the time, kept back until the end screen where the reveal is the payoff.
+  // It is never sent to a client while a game is running.
+  recordChronicle(type, text, meta = {}) {
+    this.chronicle.push({
+      day: this.dayCount,
+      // Dawn resolution runs with the phase already flipped to day, but a body
+      // found at sunrise belongs to the night that made it.
+      phase: this.chronicleAct || this.phase,
+      type,
+      text,
+      ...meta,
+      ts: Date.now(),
+    });
+    if (this.chronicle.length > 240) this.chronicle.shift();
+  }
+
+  // What killed someone, when the caller hasn't said. Good enough for the
+  // handful of exotic paths that don't name their own cause.
+  inferDeathCause() {
+    if (this.phase === 'night') return 'night';
+    if (this.phase === 'trial' || this.phase === 'accusation' || this.phase === 'defense') return 'vote';
+    return 'unknown';
+  }
+
   emitPrivateNotice(playerId, payload) {
     const socketId = this.getSocketId(playerId);
     if (!socketId) return;
@@ -1109,15 +1145,28 @@ class GameEngine {
   applyRoleChange(playerId, newRole) {
     const assignment = this.assignments[playerId];
     if (!assignment || !newRole) return;
+    const previous = assignment.currentRole;
     assignment.currentRole = newRole;
+    if (previous !== newRole) {
+      this.recordChronicle(
+        'transform',
+        `${this.getPlayerName(playerId)} turned from ${previous} into ${newRole}.`,
+        { playerId, from: previous, to: newRole },
+      );
+    }
   }
 
-  markPlayerDead(playerId, killedSet = null) {
+  markPlayerDead(playerId, killedSet = null, cause = null) {
     const assignment = this.assignments[playerId];
     if (!assignment || assignment.isDead) return false;
     assignment.isDead = true;
     this.revealedCards[playerId] = assignment.currentRole;
     if (killedSet) killedSet.add(playerId);
+    this.recordChronicle(
+      'death',
+      `${this.getPlayerName(playerId)} died — they were the ${assignment.currentRole}.`,
+      { playerId, role: assignment.currentRole, cause: cause || this.inferDeathCause() },
+    );
     this.resolveDoppelgangersForDeath(playerId);
     this.promoteApprenticeSeerOnSeerDeath(playerId);
 
@@ -1150,11 +1199,11 @@ class GameEngine {
         const rightId = ids[(idx + 1) % ids.length];
         this.logEvent(`The Mad Bomber's explosives go off! The blast catches those seated beside them.`);
         if (leftId && leftId !== playerId && this.hasLiveAssignment(leftId)) {
-          this.markPlayerDead(leftId, killedSet);
+          this.markPlayerDead(leftId, killedSet, 'bomber');
           this.logEvent(`${this.getPlayerName(leftId)} was caught in the blast (left of Mad Bomber).`);
         }
         if (rightId && rightId !== playerId && rightId !== leftId && this.hasLiveAssignment(rightId)) {
-          this.markPlayerDead(rightId, killedSet);
+          this.markPlayerDead(rightId, killedSet, 'bomber');
           this.logEvent(`${this.getPlayerName(rightId)} was caught in the blast (right of Mad Bomber).`);
         }
       }
@@ -1163,7 +1212,7 @@ class GameEngine {
     // Cupid heartbreak death
     const partnerId = this.cupidLinks[playerId];
     if (partnerId && this.hasLiveAssignment(partnerId)) {
-      this.markPlayerDead(partnerId, killedSet);
+      this.markPlayerDead(partnerId, killedSet, 'heartbreak');
       this.logEvent(`${this.getPlayerName(partnerId)} died of heartbreak — they were linked by Cupid.`);
     }
 
@@ -1306,7 +1355,7 @@ class GameEngine {
       if (victim) {
         const victimName = this.getPlayerName(victim);
         this.logEvent(`The Reflector's mirror flung the attack back — ${victimName} fell to the pack's own fangs.`);
-        this.markPlayerDead(victim, killedSet);
+        this.markPlayerDead(victim, killedSet, 'wolves');
       } else {
         this.logEvent(`The Reflector's mirror flashed — but the wolves vanished into the dark before it could strike them.`);
       }
@@ -1348,7 +1397,7 @@ class GameEngine {
     }
 
     this.maybeEmitWolverineWarning(targetId);
-    if (this.markPlayerDead(targetId, killedSet)) {
+    if (this.markPlayerDead(targetId, killedSet, 'wolves')) {
       this.logEvent(`${targetName} was killed during the night.`);
 
       // Diseased: wolves cannot kill the next night.
@@ -1368,7 +1417,7 @@ class GameEngine {
     [...this.toughGuyHit].forEach((id) => {
       this.toughGuyHit.delete(id);
       if (!this.hasLiveAssignment(id)) return;
-      if (this.markPlayerDead(id, deadSet)) {
+      if (this.markPlayerDead(id, deadSet, 'wounds')) {
         this.logEvent(`${this.getPlayerName(id)} (the Tough Guy) finally fell from the wolf wound.`);
       }
     });
@@ -1770,6 +1819,9 @@ class GameEngine {
       currentNightAction: myActiveRole ? this.currentNightAction : null,
       nightPendingContinue: !!(playerId && this.hasPendingNightResultAck(playerId)),
       publicAssignments,
+      // Held back entirely until the game is over — it contains everything that
+      // was hidden while it mattered.
+      chronicle: isEnd ? this.chronicle : [],
       winner: this.winner,
       settings: this.settings,
       wwKillVotes: isWerewolfTurn ? this.wwKillVotes : {},
@@ -2015,6 +2067,14 @@ class GameEngine {
     if (this.cultLeaderId) this.cultMembers.add(this.cultLeaderId);
 
     this.phase = 'dealing';
+    this.recordChronicle('open', `${n} players took their seats.`, {
+      lineup: this.players.map(p => ({
+        playerId: p.id,
+        name: p.name,
+        role: this.assignments[p.id].originalRole,
+      })),
+      centerCards: [...this.centerCards],
+    });
     this.broadcastState();
     this.dealTimer = setTimeout(() => this.startNight(), 5000);
     return true;
@@ -2024,6 +2084,8 @@ class GameEngine {
   startNight() {
     this.clearAllTimers();
     this.phase = 'night';
+    // The trial's outcome is fully spent once the night begins.
+    this.executionPending = false;
     this.resetNightState();
     // Day-status carry-overs expire at nightfall (Spellcaster/Old Hag last one day).
     this.resetDayState();
@@ -3163,7 +3225,9 @@ class GameEngine {
     this.currentNightActors = [];
     this.pendingNightResultAcks = {};
 
+    this.chronicleAct = 'night';
     const dawnDead = this.resolveDawnKills();
+    this.chronicleAct = null;
     if (dawnDead.length > 0) {
       if (this.checkWinConditions(dawnDead, 'night')) return;
     }
@@ -3237,9 +3301,7 @@ class GameEngine {
   startAccusation() {
     this.clearTimer();
     this.phase = 'accusation';
-    this.accusationVotes = {};
-    this.trialVotes = {};
-    this.accusedId = null;
+    this.resetVoteState();
     this.timeLeft = this.settings.accusationLength;
     this.logBotEvent('System', 'Accusation', 'start',
       `D${this.dayCount} | duration: ${this.timeLeft}s`);
@@ -3358,11 +3420,19 @@ class GameEngine {
 
     if (!topId || tied || topVotes <= 0) {
       this.logEvent('No one was accused. Night falls.');
+      this.recordChronicle('vote', tied
+        ? 'The village deadlocked and no one was accused.'
+        : 'The village named no one.', { tally });
       this.advanceToNight();
       return;
     }
 
     this.accusedId = topId;
+    this.recordChronicle(
+      'accusation',
+      `The village turned on ${this.getPlayerName(topId)} with ${topVotes} vote${topVotes === 1 ? '' : 's'}.`,
+      { playerId: topId, votes: topVotes, tally },
+    );
     this.startDefense();
   }
 
@@ -3401,7 +3471,9 @@ class GameEngine {
 
   skipTrial(socketId) {
     const p = this.players.find(x => x.socketId === socketId);
-    if (p && p.isHost && this.phase === 'trial') {
+    // Once the execution is under way the verdict is already in — further
+    // presses must not restart it.
+    if (p && p.isHost && this.phase === 'trial' && !this.executionPending) {
       this.clearTimer();
       this.logBotEvent('System', 'Trial', 'skipped', 'Host force-tallied the trial.');
       this.resolveTrial();
@@ -3515,6 +3587,7 @@ class GameEngine {
   }
 
   resolveTrial() {
+    if (this.executionPending) return;
     this.clearTimer();
     const { eliminate, save } = this.countTrialVotes();
     const accusedName = this.getPlayerName(this.accusedId);
@@ -3522,8 +3595,14 @@ class GameEngine {
       `Eliminate: ${eliminate} | Save: ${save} | Accused: ${accusedName}`);
 
     if (eliminate > save) {
+      this.recordChronicle('verdict',
+        `The village condemned ${accusedName}, ${eliminate} to ${save}.`,
+        { playerId: this.accusedId, eliminate, save });
       this.executeTrialElimination();
     } else {
+      this.recordChronicle('verdict',
+        `${accusedName} talked their way out, ${save} to ${eliminate}.`,
+        { playerId: this.accusedId, eliminate, save });
       this.logEvent(`The village voted to spare ${accusedName}.`);
       this.logBotEvent('System', 'Trial', 'spared', `${accusedName} was saved.`);
       this.accusedId = null;
@@ -3552,6 +3631,9 @@ class GameEngine {
     const targetRole = this.assignments[targetId]?.currentRole || '?';
 
     if (this.isVoteImmune(targetId)) {
+      this.recordChronicle('spared',
+        `${targetName} was condemned, then revealed as the Prince and walked free.`,
+        { playerId: targetId, role: 'Prince' });
       this.logEvent(`Votes against the Prince do not eliminate the Prince. ${targetName}'s role is revealed.`);
       this.revealedCards[targetId] = 'Prince';
       this.applyRoleChange(targetId, 'Villager'); // Sparing Prince becomes a Villager (so 2nd time kills them)
@@ -3569,6 +3651,9 @@ class GameEngine {
 
     const sceneType = this.pickExecutionScene();
     const sceneDuration = this.getExecutionSceneDuration(sceneType);
+    // The phase stays 'trial' for the length of the scene, so latch here to keep
+    // the verdict from being re-run while the kill is still pending.
+    this.executionPending = true;
     try {
       this.roomIo.emit('executionScene', {
         type: sceneType,
@@ -3581,7 +3666,7 @@ class GameEngine {
     this.clearTimer();
     this.timer = setTimeout(() => {
       const eliminatedRole = this.assignments[targetId]?.currentRole;
-      if (this.markPlayerDead(targetId, killed)) {
+      if (this.markPlayerDead(targetId, killed, 'vote')) {
         this.logEvent(`The village eliminated ${targetName}.`);
         this.logBotEvent('System', 'Trial', 'eliminated',
           `${targetName} (${targetRole}) was eliminated via ${sceneType}.`);
@@ -3794,6 +3879,7 @@ class GameEngine {
     this.logBotEvent('System', 'WinCheck', `win:${source}`,
       `Reason: ${this.winner} | killedByThisStep: ${killList} | aliveWolves: ${aliveWerewolves.length} | aliveNonWolves: ${aliveNonWerewolves.length} | alive: [${aliveList}] | dead: [${deadList}]`);
 
+    this.recordChronicle('end', this.winner, { source });
     this.phase = 'end';
     this.currentNightAction = null;
     this.currentNightActors = [];

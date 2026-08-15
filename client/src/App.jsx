@@ -2523,6 +2523,108 @@ const PhaseCinematic = ({ scene }) => {
   );
 };
 
+/* ─── Chronicle ───
+   The payoff of a social deduction game is the story you only learn at the end:
+   who the Seer checked, who the Bodyguard saved, that the village lynched the
+   Tanner on night two. The engine records every beat as it happens and seals it
+   until the game is over; this lays the whole thing out as a timeline. */
+const CHRONICLE_META = {
+  open: { Icon: Users, tone: 'neutral' },
+  death: { Icon: Skull, tone: 'blood' },
+  transform: { Icon: Sparkles, tone: 'magic' },
+  accusation: { Icon: Vote, tone: 'amber' },
+  verdict: { Icon: Swords, tone: 'amber' },
+  spared: { Icon: ShieldCheck, tone: 'green' },
+  vote: { Icon: Vote, tone: 'neutral' },
+  end: { Icon: Crown, tone: 'gold' },
+};
+
+const CAUSE_LABELS = {
+  wolves: 'taken by the pack',
+  vote: 'condemned by the village',
+  bomber: "caught in the bomber's blast",
+  heartbreak: 'died of a broken heart',
+  wounds: 'succumbed to their wounds',
+  night: 'lost in the night',
+};
+
+/* Fold the flat entry list into acts — one per night and per day — so the
+   timeline reads as chapters rather than a stream. */
+const groupChronicle = (entries) => {
+  const acts = [];
+  entries.forEach((entry) => {
+    const isNight = entry.phase === 'night' || entry.phase === 'dealing';
+    const key = entry.type === 'open' ? 'open'
+      : entry.type === 'end' ? 'end'
+        : `${isNight ? 'night' : 'day'}-${entry.day}`;
+    const label = entry.type === 'open' ? 'The Table'
+      : entry.type === 'end' ? 'The Reckoning'
+        : `${isNight ? 'Night' : 'Day'} ${entry.day}`;
+    let act = acts[acts.length - 1];
+    if (!act || act.key !== key) {
+      act = { key, label, isNight, entries: [] };
+      acts.push(act);
+    }
+    act.entries.push(entry);
+  });
+  return acts;
+};
+
+const ChronicleTimeline = ({ entries = [] }) => {
+  if (!entries.length) return null;
+  const acts = groupChronicle(entries);
+
+  return (
+    <div className="chronicle">
+      <h4 className="chronicle-heading">
+        <ScrollText size={14} />
+        The Chronicle
+      </h4>
+      <p className="chronicle-sub">Everything that happened, including what you weren&apos;t told.</p>
+
+      <ol className="chronicle-acts">
+        {acts.map((act) => (
+          <li key={act.key} className={`chronicle-act ${act.isNight ? 'is-night' : 'is-day'}`}>
+            <div className="chronicle-act-head">
+              {act.isNight ? <Moon size={12} /> : <Sun size={12} />}
+              <span>{act.label}</span>
+            </div>
+            <ul className="chronicle-entries">
+              {act.entries.map((entry, i) => {
+                const meta = CHRONICLE_META[entry.type] || CHRONICLE_META.vote;
+                const { Icon } = meta;
+                return (
+                  <li key={`${entry.ts}-${i}`} className={`chronicle-entry tone-${meta.tone}`}>
+                    <span className="chronicle-entry-icon"><Icon size={13} /></span>
+                    <div className="chronicle-entry-body">
+                      <span className="chronicle-entry-text">{entry.text}</span>
+                      {entry.cause && CAUSE_LABELS[entry.cause] && (
+                        <span className="chronicle-entry-note">{CAUSE_LABELS[entry.cause]}</span>
+                      )}
+                      {entry.lineup && (
+                        <span className="chronicle-lineup">
+                          {entry.lineup.map((seat) => (
+                            <span key={seat.playerId} className="chronicle-seat">
+                              {seat.name}
+                              <strong style={{ color: ROLE_COLORS[seat.role] || 'var(--amber-glow)' }}>
+                                {seat.role}
+                              </strong>
+                            </span>
+                          ))}
+                        </span>
+                      )}
+                    </div>
+                  </li>
+                );
+              })}
+            </ul>
+          </li>
+        ))}
+      </ol>
+    </div>
+  );
+};
+
 /* ─── Reconnect badge ───
    A dropped player is usually on their way back — a locked phone, a refreshed
    tab, a tunnel. Showing their seat counting down tells the table to wait
@@ -6110,6 +6212,7 @@ function App() {
               );
             })}
           </div>
+          <ChronicleTimeline entries={gameState.chronicle} />
           {me?.isHost && (
             <div style={{ marginTop: '1.4rem', textAlign: 'center' }}>
               {deckWarning && (

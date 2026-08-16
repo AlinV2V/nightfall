@@ -125,20 +125,7 @@ const Candles = () => {
 };
 
 /* ─── Circular seat layout around the round table ─── */
-const SeatRoleCard = ({ role }) => {
-  const image = getRoleImage(role);
-  return (
-    <div className={`seat-card ${role ? 'revealed' : ''}`} aria-hidden={!role}>
-      {image ? (
-        <img src={image} alt="" />
-      ) : role ? (
-        <span>{role}</span>
-      ) : null}
-    </div>
-  );
-};
-
-const RoundTable = ({ players, playerId, phase, isMyTurn, accusedId, tableOverlay, isHost, onKick, jailedPlayerId, executionScene, children }) => {
+const RoundTable =({ players, playerId, phase, isMyTurn, accusedId, tableOverlay, isHost, onKick, jailedPlayerId, executionScene, children }) => {
   const N = Math.max(players.length, 1);
   const radius = 37;
   const tiltMax = 90;
@@ -276,9 +263,7 @@ const RoundTable = ({ players, playerId, phase, isMyTurn, accusedId, tableOverla
                       {p.isHost && !isSelf && (
                         <span className="player-badge host-badge">Host</span>
                       )}
-                      {!p.connected && (
-                        <span className="player-badge muted-badge">Offline</span>
-                      )}
+                      {!p.connected && <ReconnectBadge deadline={p.reconnectDeadline} />}
                       {(phase === 'vote' || phase === 'accusation' || phase === 'trial') && p.hasVoted && (
                         <span className="player-badge voted-badge">Voted</span>
                       )}
@@ -1106,7 +1091,6 @@ const ROLE_COLORS = {
   Revealer: '#2dd4bf',
   Curator: '#818cf8',
   Prince: '#fbbf24',
-  Cursed: '#9ca3af',
   Vampire: '#7f1d1d',
   'The Master': '#450a0a',
   'The Count': '#581c87',
@@ -1347,7 +1331,6 @@ const ROLE_ICONS = {
   Blob: CircleDot,
   Mortician: ScrollText,
   Oracle: Eye,
-  Cupid: Sparkles,
   Marksman: Target,
   Empath: Hand,
   Psychic: Stars,
@@ -1835,7 +1818,11 @@ const PHASE_ICON_MAP = { Moon, Sun, Vote, BookOpen };
 
 const HunterRevengeModal = ({ open, players, playerId, onConfirm, onPass }) => {
   const [target, setTarget] = useState(null);
-  useEffect(() => { if (!open) setTarget(null); }, [open]);
+  useEffect(() => {
+    if (open) return undefined;
+    const reset = setTimeout(() => setTarget(null), 0);
+    return () => clearTimeout(reset);
+  }, [open]);
   if (!open) return null;
   const eligible = (players || []).filter((p) => !p.isDead && p.id !== playerId);
   return (
@@ -2401,6 +2388,367 @@ const BotDebugConsole = ({ open, onClose, botDebug, onClear }) => {
   );
 };
 
+/* ─── Phase countdown ───
+   Driven by the server's wall-clock deadline instead of by tick arrival, so a
+   late or dropped tick can't freeze or desync the clock on screen. Falls back
+   to the plain second count if a phase reports no deadline. */
+const prefersReducedMotion = () =>
+  typeof window !== 'undefined'
+  && typeof window.matchMedia === 'function'
+  && window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+
+const usePhaseCountdown = (phaseEndsAt, fallbackSeconds = 0) => {
+  const [now, setNow] = useState(() => Date.now());
+
+  useEffect(() => {
+    if (!phaseEndsAt) return undefined;
+    // Sync once on the next tick so a phase starting after an idle stretch isn't
+    // measured against a stale clock, then keep pace four times a second.
+    const sync = setTimeout(() => setNow(Date.now()), 0);
+    const id = setInterval(() => setNow(Date.now()), 250);
+    return () => {
+      clearTimeout(sync);
+      clearInterval(id);
+    };
+  }, [phaseEndsAt]);
+
+  if (!phaseEndsAt) return Math.max(0, Math.floor(fallbackSeconds) || 0);
+  return Math.max(0, Math.ceil((phaseEndsAt - now) / 1000));
+};
+
+const pad2 = (n) => String(n).padStart(2, '0');
+const formatClock = (seconds) => `${pad2(Math.floor(seconds / 60))}:${pad2(seconds % 60)}`;
+
+/* ─── Phase timer ───
+   The countdown ring drains as the phase burns down and shifts through calm →
+   urgent → critical, so time pressure is legible at a glance instead of
+   requiring players to read digits. */
+const TIMER_RADIUS = 32;
+const TIMER_CIRCUMFERENCE = 2 * Math.PI * TIMER_RADIUS;
+
+const PhaseTimer = ({ seconds, total, label }) => {
+  const span = total > 0 ? total : Math.max(seconds, 1);
+  const remaining = Math.max(0, Math.min(1, seconds / span));
+  const urgency = seconds <= 5 ? 'critical' : seconds <= 15 ? 'urgent' : 'calm';
+  const minutes = Math.floor(seconds / 60);
+
+  return (
+    <div
+      className={`center-timer phase-timer is-${urgency}`}
+      role="timer"
+      aria-live={urgency === 'critical' ? 'assertive' : 'off'}
+      aria-label={`${seconds} seconds remaining`}
+    >
+      <svg className="phase-timer-ring" viewBox="0 0 72 72" aria-hidden="true">
+        <circle className="phase-timer-track" cx="36" cy="36" r={TIMER_RADIUS} />
+        <circle
+          className="phase-timer-sweep"
+          cx="36"
+          cy="36"
+          r={TIMER_RADIUS}
+          strokeDasharray={TIMER_CIRCUMFERENCE}
+          strokeDashoffset={TIMER_CIRCUMFERENCE * (1 - remaining)}
+        />
+      </svg>
+      <span className="phase-timer-face">
+        <span className="phase-timer-digits">
+          {pad2(minutes)}:{pad2(seconds % 60)}
+        </span>
+        {label && <span className="phase-timer-label">{label}</span>}
+      </span>
+    </div>
+  );
+};
+
+/* ─── Phase cinematics ───
+   A short sweep between phases so the change of act registers before the new
+   board does. Purely decorative: never blocks input, and is skipped outright
+   when the player asks for reduced motion. */
+const PHASE_CINEMATICS = {
+  night: {
+    tone: 'night',
+    kicker: 'Nightfall',
+    title: 'The Village Sleeps',
+    line: 'Doors bolt. Lanterns die. Something is awake.',
+    duration: 2000,
+  },
+  day: {
+    tone: 'dawn',
+    kicker: 'Daybreak',
+    title: 'The Village Wakes',
+    line: 'Count the living. Name the missing.',
+    duration: 2000,
+  },
+  accusation: {
+    tone: 'accusation',
+    kicker: 'The Reckoning',
+    title: 'Point a Finger',
+    line: 'Suspicion hardens into a name.',
+    duration: 1500,
+  },
+  defense: {
+    tone: 'defense',
+    kicker: 'The Defence',
+    title: 'Speak, Accused',
+    line: 'One voice against the crowd.',
+    duration: 1500,
+  },
+  trial: {
+    tone: 'trial',
+    kicker: 'The Verdict',
+    title: 'Judgement Falls',
+    line: 'Mercy or the rope. Decide.',
+    duration: 1500,
+  },
+};
+
+const PhaseCinematic = ({ scene }) => {
+  if (!scene) return null;
+  return (
+    <div
+      key={scene.id}
+      className={`phase-cinematic tone-${scene.tone}`}
+      style={{ '--cinematic-duration': `${scene.duration}ms` }}
+      aria-hidden="true"
+    >
+      <div className="phase-cinematic-veil" />
+      <div className="phase-cinematic-rays" />
+      <div className="phase-cinematic-copy">
+        <span className="phase-cinematic-kicker">{scene.kicker}</span>
+        <strong className="phase-cinematic-title">{scene.title}</strong>
+        <span className="phase-cinematic-line">{scene.line}</span>
+      </div>
+      <div className="phase-cinematic-rule" />
+    </div>
+  );
+};
+
+/* ─── Chronicle ───
+   The payoff of a social deduction game is the story you only learn at the end:
+   who the Seer checked, who the Bodyguard saved, that the village lynched the
+   Tanner on night two. The engine records every beat as it happens and seals it
+   until the game is over; this lays the whole thing out as a timeline. */
+const CHRONICLE_META = {
+  open: { Icon: Users, tone: 'neutral' },
+  death: { Icon: Skull, tone: 'blood' },
+  transform: { Icon: Sparkles, tone: 'magic' },
+  accusation: { Icon: Vote, tone: 'amber' },
+  verdict: { Icon: Swords, tone: 'amber' },
+  spared: { Icon: ShieldCheck, tone: 'green' },
+  vote: { Icon: Vote, tone: 'neutral' },
+  end: { Icon: Crown, tone: 'gold' },
+};
+
+const CAUSE_LABELS = {
+  wolves: 'taken by the pack',
+  vote: 'condemned by the village',
+  bomber: "caught in the bomber's blast",
+  heartbreak: 'died of a broken heart',
+  wounds: 'succumbed to their wounds',
+  night: 'lost in the night',
+};
+
+/* Fold the flat entry list into acts — one per night and per day — so the
+   timeline reads as chapters rather than a stream. */
+const groupChronicle = (entries) => {
+  const acts = [];
+  entries.forEach((entry) => {
+    const isNight = entry.phase === 'night' || entry.phase === 'dealing';
+    const key = entry.type === 'open' ? 'open'
+      : entry.type === 'end' ? 'end'
+        : `${isNight ? 'night' : 'day'}-${entry.day}`;
+    const label = entry.type === 'open' ? 'The Table'
+      : entry.type === 'end' ? 'The Reckoning'
+        : `${isNight ? 'Night' : 'Day'} ${entry.day}`;
+    let act = acts[acts.length - 1];
+    if (!act || act.key !== key) {
+      act = { key, label, isNight, entries: [] };
+      acts.push(act);
+    }
+    act.entries.push(entry);
+  });
+  return acts;
+};
+
+const ChronicleTimeline = ({ entries = [] }) => {
+  if (!entries.length) return null;
+  const acts = groupChronicle(entries);
+
+  return (
+    <div className="chronicle">
+      <h4 className="chronicle-heading">
+        <ScrollText size={14} />
+        The Chronicle
+      </h4>
+      <p className="chronicle-sub">Everything that happened, including what you weren&apos;t told.</p>
+
+      <ol className="chronicle-acts">
+        {acts.map((act) => (
+          <li key={act.key} className={`chronicle-act ${act.isNight ? 'is-night' : 'is-day'}`}>
+            <div className="chronicle-act-head">
+              {act.isNight ? <Moon size={12} /> : <Sun size={12} />}
+              <span>{act.label}</span>
+            </div>
+            <ul className="chronicle-entries">
+              {act.entries.map((entry, i) => {
+                const meta = CHRONICLE_META[entry.type] || CHRONICLE_META.vote;
+                const { Icon } = meta;
+                return (
+                  <li key={`${entry.ts}-${i}`} className={`chronicle-entry tone-${meta.tone}`}>
+                    <span className="chronicle-entry-icon"><Icon size={13} /></span>
+                    <div className="chronicle-entry-body">
+                      <span className="chronicle-entry-text">{entry.text}</span>
+                      {entry.cause && CAUSE_LABELS[entry.cause] && (
+                        <span className="chronicle-entry-note">{CAUSE_LABELS[entry.cause]}</span>
+                      )}
+                      {entry.lineup && (
+                        <span className="chronicle-lineup">
+                          {entry.lineup.map((seat) => (
+                            <span key={seat.playerId} className="chronicle-seat">
+                              {seat.name}
+                              <strong style={{ color: ROLE_COLORS[seat.role] || 'var(--amber-glow)' }}>
+                                {seat.role}
+                              </strong>
+                            </span>
+                          ))}
+                        </span>
+                      )}
+                    </div>
+                  </li>
+                );
+              })}
+            </ul>
+          </li>
+        ))}
+      </ol>
+    </div>
+  );
+};
+
+/* ─── Quick guide ───
+   Nightfall deals from a pool of fifty-odd roles, and a first-timer landing in
+   a lobby has no idea what a wake queue is or why nothing is happening. Five
+   cards covering the actual loop, shown once, skippable at any point, and
+   reopenable from the lobby afterwards. */
+const QUICK_GUIDE_KEY = 'ww_guide_seen';
+
+const QUICK_GUIDE_STEPS = [
+  {
+    Icon: VenetianMask,
+    tone: 'violet',
+    kicker: 'Step one',
+    title: 'You are dealt a secret',
+    body: 'Your card decides what you can do at night and which side you win with. Nobody else sees it. Some cards can change hands while you sleep.',
+  },
+  {
+    Icon: Moon,
+    tone: 'moon',
+    kicker: 'Step two',
+    title: 'Night falls',
+    body: 'Roles wake one at a time. The wolves choose someone to kill. Others look, protect, swap or meddle. You only ever see your own turn.',
+  },
+  {
+    Icon: Sun,
+    tone: 'amber',
+    kicker: 'Step three',
+    title: 'Day breaks',
+    body: 'The village learns who died — and nothing else. Now everybody talks, and some of them lie. This is where the game is actually played.',
+  },
+  {
+    Icon: Vote,
+    tone: 'crimson',
+    kicker: 'Step four',
+    title: 'Someone hangs',
+    body: 'Accuse a player, hear them defend themselves, then vote to condemn or spare. Guess wrong and you have handed the wolves a free night.',
+  },
+  {
+    Icon: Crown,
+    tone: 'gold',
+    kicker: 'How it ends',
+    title: 'Last side standing',
+    body: 'The village wins when every werewolf is gone. The wolves win the moment they match or outnumber everyone else. A few odd cards want something else entirely.',
+  },
+];
+
+const QuickGuide = ({ open, onClose }) => {
+  const [step, setStep] = useState(0);
+
+  useEffect(() => {
+    if (!open) return undefined;
+    const onKey = (e) => {
+      if (e.key === 'Escape') onClose();
+      if (e.key === 'ArrowRight') setStep((s) => Math.min(s + 1, QUICK_GUIDE_STEPS.length - 1));
+      if (e.key === 'ArrowLeft') setStep((s) => Math.max(s - 1, 0));
+    };
+    window.addEventListener('keydown', onKey);
+    return () => window.removeEventListener('keydown', onKey);
+  }, [open, onClose]);
+
+  if (!open) return null;
+  const current = QUICK_GUIDE_STEPS[step];
+  const { Icon } = current;
+  const isLast = step === QUICK_GUIDE_STEPS.length - 1;
+
+  return (
+    <div className="guide-backdrop" onClick={onClose} role="dialog" aria-modal="true" aria-label="Quick guide">
+      <div className={`guide-card tone-${current.tone}`} onClick={(e) => e.stopPropagation()}>
+        <button className="guide-skip" onClick={onClose}>Skip</button>
+
+        <div className="guide-icon"><Icon size={26} /></div>
+        <span className="guide-kicker">{current.kicker}</span>
+        <h3 className="guide-title">{current.title}</h3>
+        <p className="guide-body">{current.body}</p>
+
+        <div className="guide-dots" aria-hidden="true">
+          {QUICK_GUIDE_STEPS.map((s, i) => (
+            <span key={s.title} className={`guide-dot ${i === step ? 'is-current' : ''}`} />
+          ))}
+        </div>
+
+        <div className="guide-actions">
+          <button
+            className="btn-secondary"
+            onClick={() => setStep((s) => Math.max(s - 1, 0))}
+            disabled={step === 0}
+          >
+            Back
+          </button>
+          {isLast ? (
+            <button className="btn-primary" onClick={onClose}>Let me play</button>
+          ) : (
+            <button className="btn-primary" onClick={() => setStep((s) => s + 1)}>Next</button>
+          )}
+        </div>
+      </div>
+    </div>
+  );
+};
+
+/* ─── Reconnect badge ───
+   A dropped player is usually on their way back — a locked phone, a refreshed
+   tab, a tunnel. Showing their seat counting down tells the table to wait
+   instead of reading the silence as a quit. */
+const ReconnectBadge = ({ deadline }) => {
+  const secondsLeft = usePhaseCountdown(deadline, 0);
+  if (!deadline || secondsLeft <= 0) {
+    return <span className="player-badge muted-badge">Offline</span>;
+  }
+  return (
+    <span className="player-badge reconnect-badge" title="Holding their seat">
+      <span className="reconnect-pip" aria-hidden="true" />
+      Back in {secondsLeft}s
+    </span>
+  );
+};
+
+/* Ambient layers every scene shares, plus whatever cinematic is mid-flight. */
+const SceneAtmosphere = ({ cinematic = null }) => (
+  <>
+    <AmbientEmbers />
+    <PhaseCinematic scene={cinematic} />
+  </>
+);
+
 function App() {
   const [inRoom, setInRoom] = useState(
     () => !!(getStoredValue('ww_roomId') && getStoredValue('ww_name'))
@@ -2416,6 +2764,14 @@ function App() {
   const [showCustomDeck, setShowCustomDeck] = useState(false);
   const [roleHelpRole, setRoleHelpRole] = useState(null);
   const [showRuleBook, setShowRuleBook] = useState(false);
+  // Shown once on a player's first lobby, and reopenable from there afterwards.
+  const [showQuickGuide, setShowQuickGuide] = useState(
+    () => getStoredValue(QUICK_GUIDE_KEY) !== '1'
+  );
+  const dismissQuickGuide = () => {
+    setShowQuickGuide(false);
+    try { localStorage.setItem(QUICK_GUIDE_KEY, '1'); } catch { /* noop */ }
+  };
   const [showBotConsole, setShowBotConsole] = useState(false);
   const [muted, setMuted] = useState(() => {
     const stored = getStoredValue('ww_muted');
@@ -2452,6 +2808,36 @@ function App() {
   const isLobbyView = !inRoom || !gameState;
   const isLobbyViewRef = useRef(isLobbyView);
   const [executionScene, setExecutionScene] = useState(null);
+  const [phaseCinematic, setPhaseCinematic] = useState(null);
+  const lastCinematicPhase = useRef(null);
+
+  // Play a short sweep whenever the act changes. The very first state we receive
+  // is skipped — arriving mid-game shouldn't trigger a transition for a phase the
+  // player was never in.
+  useEffect(() => {
+    const phase = gameState?.phase;
+    if (!phase) return undefined;
+    if (lastCinematicPhase.current === null) {
+      lastCinematicPhase.current = phase;
+      return undefined;
+    }
+    if (lastCinematicPhase.current === phase) return undefined;
+    lastCinematicPhase.current = phase;
+
+    const spec = PHASE_CINEMATICS[phase];
+    if (!spec || prefersReducedMotion()) return undefined;
+
+    // Deferred a frame so the incoming phase paints before the sweep starts.
+    const start = setTimeout(() => setPhaseCinematic({ ...spec, id: `${phase}-${Date.now()}` }), 0);
+    const clear = setTimeout(() => setPhaseCinematic(null), spec.duration);
+    return () => {
+      clearTimeout(start);
+      clearTimeout(clear);
+    };
+  }, [gameState?.phase]);
+
+  // One countdown for every timed phase, resolved from the server's deadline.
+  const secondsLeft = usePhaseCountdown(gameState?.phaseEndsAt, gameState?.timeLeft);
 
   useEffect(() => {
     mutedRef.current = muted;
@@ -3064,12 +3450,12 @@ function App() {
     };
     socket.on('executionScene', handleExecutionScene);
 
-    const handlePhaseTick = ({ phase, timeLeft }) => {
+    const handlePhaseTick = ({ phase, timeLeft, phaseEndsAt, phaseDuration }) => {
       setGameState((current) => {
         if (!current) return current;
         if (phase && current.phase !== phase) return current;
-        if (current.timeLeft === timeLeft) return current;
-        return { ...current, timeLeft };
+        if (current.timeLeft === timeLeft && current.phaseEndsAt === phaseEndsAt) return current;
+        return { ...current, timeLeft, phaseEndsAt, phaseDuration };
       });
     };
     socket.on('phaseTick', handlePhaseTick);
@@ -3156,15 +3542,17 @@ function App() {
   const startGame = () => socket.emit('startGame');
   const submitNightAction = (type, t1, t2) =>
     socket.emit('nightAction', { type, target1: t1, target2: t2 });
+  // Note the send, but leave the button's visibility to the server. Clearing
+  // requiresContinue locally used to hide the only way forward if the emit was
+  // dropped — including by the client's own rate limiter.
   const continueNightResult = () => {
-    setActionResult((current) =>
-      current ? { ...current, requiresContinue: false, continued: true } : current
-    );
+    setActionResult((current) => (current ? { ...current, continued: true } : current));
     socket.emit('nightAction', { type: 'continue' });
   };
   const submitVote = (targetId) => socket.emit('submitVote', targetId);
   const submitTrialVote = (choice) => socket.emit('submitTrialVote', choice);
   const skipDay = () => socket.emit('skipDay');
+  const skipNight = () => socket.emit('skipNight');
   const skipDefense = () => socket.emit('skipDefense');
   const skipAccusation = () => socket.emit('skipAccusation');
   const skipTrial = () => socket.emit('skipTrial');
@@ -3291,24 +3679,35 @@ function App() {
         <div ref={ghostChatEndRef} />
       </div>
       {ghostInfo.canSpeak ? (
-        <form onSubmit={sendGhostMessage} className="town-chat-form">
-          <input
-            className="town-chat-input"
-            value={ghostChatInput}
-            onChange={(e) => setGhostChatInput(e.target.value.slice(0, 1))}
-            placeholder="One letter…"
-            maxLength={1}
-          />
-          <button
-            type="submit"
-            className="btn-secondary"
-            style={{ padding: '6px 12px', minHeight: 36 }}
-          >
-            <Send size={14} />
-          </button>
-        </form>
+        <>
+          <form onSubmit={sendGhostMessage} className="town-chat-form">
+            <input
+              className="town-chat-input"
+              value={ghostChatInput}
+              onChange={(e) => setGhostChatInput(e.target.value.slice(0, 1))}
+              placeholder="One letter…"
+              maxLength={1}
+            />
+            <button
+              type="submit"
+              className="btn-secondary"
+              style={{ padding: '6px 12px', minHeight: 36 }}
+            >
+              <Send size={14} />
+            </button>
+          </form>
+          <p className="ghost-chat-note">One letter, once today. Spend it well.</p>
+        </>
+      ) : ghostInfo.letterSpent ? (
+        <p className="town-chat-dead">You have spent your letter today. The dark takes the rest.</p>
+      ) : ghostInfo.isGhost ? (
+        <p className="town-chat-dead">Your voice only carries in daylight.</p>
       ) : (
-        <p className="town-chat-dead">Only the dead may whisper here — die first, then you can speak one letter at a time.</p>
+        <p className="town-chat-dead">
+          {ghostInfo.ghostCount > 0
+            ? 'Something lingers and may leave a letter. Watch for it.'
+            : 'Nothing has lingered. Not every death leaves a ghost behind.'}
+        </p>
       )}
     </div>
   ) : null;
@@ -3398,7 +3797,7 @@ function App() {
             style={{ '--vol': `${(lobbyMusicMuted ? 0 : lobbyMusicVolume) * 100}%` }}
           />
         </div>
-        <AmbientEmbers />
+        <SceneAtmosphere cinematic={phaseCinematic} />
         <NoticeStack notices={privateNotices} />
         <div className="lobby-card">
           <h1 className="title">Nightfall</h1>
@@ -3935,7 +4334,8 @@ function App() {
   if (gameState.phase === 'lobby') {
     return (
       <div className="table-scene">
-        <AmbientEmbers />
+        <SceneAtmosphere cinematic={phaseCinematic} />
+        <QuickGuide open={showQuickGuide} onClose={dismissQuickGuide} />
         <NoticeStack notices={privateNotices} />
         <GameHeader
           roomId={gameState.roomId}
@@ -3975,8 +4375,16 @@ function App() {
               >
                 <button
                   className="btn-secondary"
+                  onClick={() => setShowQuickGuide(true)}
+                  style={{ padding: '8px 12px', fontSize: '0.78rem', minHeight: 40 }}
+                  title="How to play"
+                >
+                  <BadgeQuestionMark size={14} />
+                </button>
+                <button
+                  className="btn-secondary"
                   onClick={() => setShowSettings(!showSettings)}
-                  style={{ padding: '8px 12px', fontSize: '0.78rem', minHeight: 36 }}
+                  style={{ padding: '8px 12px', fontSize: '0.78rem', minHeight: 40 }}
                   title="Configure Settings"
                 >
                   <Settings size={14} />
@@ -4019,6 +4427,17 @@ function App() {
               )}
             </>
           ) : (
+            <>
+            <div style={{ marginTop: '12px', pointerEvents: 'auto' }}>
+              <button
+                className="btn-secondary"
+                onClick={() => setShowQuickGuide(true)}
+                style={{ padding: '8px 14px', fontSize: '0.78rem', minHeight: 40 }}
+              >
+                <BadgeQuestionMark size={14} />
+                {' '}How to play
+              </button>
+            </div>
             <p
               style={{
                 color: 'var(--text-muted)',
@@ -4030,6 +4449,7 @@ function App() {
             >
               Awaiting the host…
             </p>
+            </>
           )}
         </RoundTable>
         {me?.isHost && showSettings && renderHostSettingsPanel()}
@@ -4043,7 +4463,7 @@ function App() {
   if (gameState.phase === 'dealing') {
     return (
       <div className="table-scene">
-        <AmbientEmbers />
+        <SceneAtmosphere cinematic={phaseCinematic} />
         <NoticeStack notices={privateNotices} />
         <GameHeader
           roomId={gameState.roomId}
@@ -4220,7 +4640,8 @@ function App() {
 
       if (actionResult && actionResult.type !== 'error') {
         const r = actionResult;
-        const pendingContinue = !!(r.requiresContinue && gameState.nightPendingContinue);
+        // Server truth only — it knows whether the acknowledgement landed.
+        const pendingContinue = !!gameState.nightPendingContinue;
         return (
           <div className="action-prompt action-result-prompt">
             <div className="action-result-head">
@@ -4998,7 +5419,7 @@ function App() {
 
     return (
       <div className="table-scene">
-        <AmbientEmbers />
+        <SceneAtmosphere cinematic={phaseCinematic} />
         <NoticeStack notices={privateNotices} />
         <GameHeader
           roomId={gameState.roomId}
@@ -5028,6 +5449,13 @@ function App() {
             kicker={`Night ${gameState.dayCount}`}
             title="The Wolves Stir"
           />
+          {gameState.currentNightAction && secondsLeft > 0 && (
+            <PhaseTimer
+              seconds={secondsLeft}
+              total={gameState.phaseDuration}
+              label={gameState.nightPendingContinue ? 'Review' : 'Act'}
+            />
+          )}
         </RoundTable>
         <div className="game-panel night-panel">
           <PhaseCommandPanel
@@ -5038,13 +5466,21 @@ function App() {
             progress={gameState.nightProgress}
             progressLabel="Night actions"
             actions={(
-              <button
-                className="btn-secondary role-help-trigger"
-                onClick={() => openRoleHelp(gameState.myOriginalRole)}
-              >
-                <BookOpen size={14} />
-                Role Guide
-              </button>
+              <>
+                <button
+                  className="btn-secondary role-help-trigger"
+                  onClick={() => openRoleHelp(gameState.myOriginalRole)}
+                >
+                  <BookOpen size={14} />
+                  Role Guide
+                </button>
+                {me?.isHost && (
+                  <button className="btn-secondary" onClick={skipNight}>
+                    <Sun size={14} />
+                    Break for Dawn
+                  </button>
+                )}
+              </>
             )}
           >
           <div className="night-role-strip">
@@ -5159,11 +5595,9 @@ function App() {
      DAY
      ============================================================ */
   if (gameState.phase === 'day') {
-    const m = Math.floor(gameState.timeLeft / 60),
-      s = gameState.timeLeft % 60;
     return (
       <div className="table-scene">
-        <AmbientEmbers />
+        <SceneAtmosphere cinematic={phaseCinematic} />
         <NoticeStack notices={privateNotices} />
         <GameHeader
           roomId={gameState.roomId}
@@ -5191,16 +5625,18 @@ function App() {
             kicker={`Day ${gameState.dayCount}`}
             title="The Town Speaks"
           />
-          <div className="center-timer">
-            {String(m).padStart(2, '0')}:{String(s).padStart(2, '0')}
-          </div>
+          <PhaseTimer
+            seconds={secondsLeft}
+            total={gameState.phaseDuration}
+            label="Debate"
+          />
         </RoundTable>
         <div className="game-panel" style={{ textAlign: 'center' }}>
           <PhaseCommandPanel
             icon={<Sun size={15} />}
             kicker={`Day ${gameState.dayCount}`}
             title="Discuss and Decide"
-            status={`${String(m).padStart(2, '0')}:${String(s).padStart(2, '0')}`}
+            status={formatClock(secondsLeft)}
             actions={(
               <>
                 <button
@@ -5328,8 +5764,6 @@ function App() {
   if (gameState.phase === 'accusation') {
     const currentVoteRole = gameState.myCurrentRole || gameState.myOriginalRole;
     const isPacifistVote = currentVoteRole === 'Pacifist';
-    const acm = Math.floor((gameState.timeLeft || 0) / 60);
-    const acs = (gameState.timeLeft || 0) % 60;
     const voteStatus = isDead
       ? 'Watching'
       : me?.hasVoted
@@ -5339,7 +5773,7 @@ function App() {
           : 'Choose or skip';
     return (
       <div className="table-scene">
-        <AmbientEmbers />
+        <SceneAtmosphere cinematic={phaseCinematic} />
         <NoticeStack notices={privateNotices} />
         <GameHeader
           roomId={gameState.roomId}
@@ -5367,9 +5801,11 @@ function App() {
             kicker="Accusation"
             title="Point a Finger"
           />
-          <div className="center-timer">
-            {String(acm).padStart(2, '0')}:{String(acs).padStart(2, '0')}
-          </div>
+          <PhaseTimer
+            seconds={secondsLeft}
+            total={gameState.phaseDuration}
+            label="Accuse"
+          />
         </RoundTable>
         <div className="game-panel" style={{ textAlign: 'center' }}>
           <PhaseCommandPanel
@@ -5526,11 +5962,9 @@ function App() {
   if (gameState.phase === 'defense') {
     const accused = gameState.players.find((p) => p.id === gameState.accusedId);
     const accusedName = accused ? accused.name : 'The accused';
-    const dm = Math.floor((gameState.timeLeft || 0) / 60);
-    const ds = (gameState.timeLeft || 0) % 60;
     return (
       <div className="table-scene">
-        <AmbientEmbers />
+        <SceneAtmosphere cinematic={phaseCinematic} />
         <NoticeStack notices={privateNotices} />
         <GameHeader
           roomId={gameState.roomId}
@@ -5561,9 +5995,11 @@ function App() {
                 kicker="Defense"
                 title="State Your Innocence"
               />
-              <div className="center-timer">
-                {String(dm).padStart(2, '0')}:{String(ds).padStart(2, '0')}
-              </div>
+              <PhaseTimer
+                seconds={secondsLeft}
+                total={gameState.phaseDuration}
+                label="Defence"
+              />
             </div>
           )}
         </RoundTable>
@@ -5572,7 +6008,7 @@ function App() {
             icon={<Vote size={15} />}
             kicker="Defense"
             title={`${accusedName} is on trial`}
-            status={`${String(dm).padStart(2, '0')}:${String(ds).padStart(2, '0')}`}
+            status={formatClock(secondsLeft)}
             actions={(
               <>
                 <button
@@ -5645,8 +6081,6 @@ function App() {
   if (gameState.phase === 'trial') {
     const accused = gameState.players.find((p) => p.id === gameState.accusedId);
     const accusedName = accused ? accused.name : 'The accused';
-    const tm = Math.floor((gameState.timeLeft || 0) / 60);
-    const ts = (gameState.timeLeft || 0) % 60;
     const isAccused = gameState.accusedId === playerId;
     const myTrialVote = gameState.myTrialVote;
     const currentTrialRole = gameState.myCurrentRole || gameState.myOriginalRole;
@@ -5662,7 +6096,7 @@ function App() {
             : 'Eliminate or Save';
     return (
       <div className="table-scene">
-        <AmbientEmbers />
+        <SceneAtmosphere cinematic={phaseCinematic} />
         <NoticeStack notices={privateNotices} />
         <GameHeader
           roomId={gameState.roomId}
@@ -5696,9 +6130,11 @@ function App() {
                 kicker="Trial"
                 title="Verdict"
               />
-              <div className="center-timer">
-                {String(tm).padStart(2, '0')}:{String(ts).padStart(2, '0')}
-              </div>
+              <PhaseTimer
+                seconds={secondsLeft}
+                total={gameState.phaseDuration}
+                label="Verdict"
+              />
             </div>
           )}
         </RoundTable>
@@ -5844,7 +6280,7 @@ function App() {
 
     return (
       <div className="table-scene">
-        <AmbientEmbers />
+        <SceneAtmosphere cinematic={phaseCinematic} />
         <NoticeStack notices={privateNotices} />
         <GameHeader
           roomId={gameState.roomId}
@@ -5915,6 +6351,7 @@ function App() {
               );
             })}
           </div>
+          <ChronicleTimeline entries={gameState.chronicle} />
           {me?.isHost && (
             <div style={{ marginTop: '1.4rem', textAlign: 'center' }}>
               {deckWarning && (

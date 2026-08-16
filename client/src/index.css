@@ -3636,3 +3636,631 @@ h1, h2, h3, h4 {
   letter-spacing: 0.05em !important;
   text-transform: uppercase !important;
 }
+
+/* ============================================================
+   PHASE TIMER — countdown ring
+   Replaces the flat mm:ss readout. The ring drains as the phase
+   burns down and the whole dial escalates calm → urgent → critical,
+   so time pressure reads at a glance instead of by parsing digits.
+   ============================================================ */
+.center-timer.phase-timer {
+  --timer-hue: var(--amber-glow);
+  --timer-shadow: rgba(212, 148, 58, 0.44);
+  position: relative;
+  display: grid;
+  place-items: center;
+  width: 96px;
+  height: 96px;
+  margin-top: 0.55rem;
+  transition: transform 260ms var(--ease);
+}
+
+.phase-timer-ring {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  transform: rotate(-90deg);
+  overflow: visible;
+}
+
+.phase-timer-track,
+.phase-timer-sweep {
+  fill: none;
+  stroke-width: 3;
+  stroke-linecap: round;
+}
+
+.phase-timer-track {
+  stroke: rgba(255, 255, 255, 0.07);
+}
+
+.phase-timer-sweep {
+  stroke: var(--timer-hue);
+  filter: drop-shadow(0 0 6px var(--timer-shadow));
+  /* Only the sweep animates; a 250ms transition keeps it fluid between ticks
+     without lagging behind a phase that ends abruptly. */
+  transition: stroke-dashoffset 250ms linear, stroke 400ms var(--ease);
+}
+
+.phase-timer-face {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 2px;
+  line-height: 1;
+}
+
+.phase-timer-digits {
+  font-family: var(--font-display);
+  font-weight: 700;
+  font-size: clamp(1.25rem, 3.2vmin, 1.6rem);
+  letter-spacing: 0.08em;
+  color: var(--timer-hue);
+  font-variant-numeric: tabular-nums;
+  text-shadow: 0 0 16px var(--timer-shadow), 0 3px 12px rgba(0, 0, 0, 0.72);
+  transition: color 400ms var(--ease);
+}
+
+.phase-timer-label {
+  font-family: var(--font-ui);
+  font-size: 0.58rem;
+  font-weight: 600;
+  letter-spacing: 0.22em;
+  text-transform: uppercase;
+  color: var(--text-muted);
+}
+
+/* Escalation. Amber while there's room to think, gold when the window is
+   closing, blood-red and pulsing in the last few seconds. */
+.center-timer.phase-timer.is-urgent {
+  --timer-hue: #ffc857;
+  --timer-shadow: rgba(255, 200, 87, 0.6);
+}
+
+.center-timer.phase-timer.is-critical {
+  --timer-hue: var(--crimson-glow);
+  --timer-shadow: rgba(224, 64, 64, 0.72);
+  animation: timerCritical 1s ease-in-out infinite;
+}
+
+.center-timer.phase-timer.is-critical .phase-timer-label {
+  color: rgba(255, 160, 150, 0.9);
+}
+
+@keyframes timerCritical {
+  0%, 100% { transform: scale(1); }
+  50%      { transform: scale(1.055); }
+}
+
+/* Phase tints layered over the base dial. */
+.phase-defense .center-timer.phase-timer.is-calm,
+.phase-trial   .center-timer.phase-timer.is-calm {
+  --timer-hue: #ffb1a6;
+  --timer-shadow: rgba(185, 48, 48, 0.52);
+}
+
+/* ============================================================
+   PHASE CINEMATICS — the sweep between acts
+   Decorative only: never intercepts input, and is suppressed
+   entirely under prefers-reduced-motion.
+   ============================================================ */
+.phase-cinematic {
+  position: fixed;
+  inset: 0;
+  z-index: 90;
+  pointer-events: none;
+  display: grid;
+  place-items: center;
+  animation: cinematicFade var(--cinematic-duration, 2000ms) var(--ease) both;
+}
+
+.phase-cinematic-veil {
+  position: absolute;
+  inset: 0;
+  background: radial-gradient(circle at 50% 42%, transparent 12%, rgba(4, 2, 8, 0.9) 78%);
+  animation: cinematicVeil var(--cinematic-duration, 2000ms) var(--ease) both;
+}
+
+/* A wide band of light that wipes across the screen once per transition. */
+.phase-cinematic-rays {
+  position: absolute;
+  inset: -30% -60%;
+  background: linear-gradient(
+    100deg,
+    transparent 34%,
+    var(--cinematic-ray, rgba(212, 148, 58, 0.22)) 48%,
+    transparent 62%
+  );
+  animation: cinematicSweep var(--cinematic-duration, 2000ms) var(--ease) both;
+}
+
+.phase-cinematic-copy {
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 6px;
+  text-align: center;
+  padding: 0 20px;
+  animation: cinematicCopy var(--cinematic-duration, 2000ms) var(--ease) both;
+}
+
+/* Scrim behind the copy. The veil alone leaves the centre of the screen bright,
+   which let panel text read straight through the title. */
+.phase-cinematic-copy::before {
+  content: '';
+  position: absolute;
+  inset: -80% -46%;
+  z-index: -1;
+  background: radial-gradient(
+    ellipse 52% 50% at 50% 50%,
+    rgba(4, 2, 8, 0.88) 0%,
+    rgba(4, 2, 8, 0.66) 46%,
+    transparent 76%
+  );
+}
+
+.phase-cinematic-kicker {
+  font-family: var(--font-ui);
+  font-size: 0.68rem;
+  font-weight: 600;
+  letter-spacing: 0.42em;
+  text-transform: uppercase;
+  color: var(--cinematic-accent, var(--amber));
+}
+
+.phase-cinematic-title {
+  font-family: var(--font-display);
+  font-weight: 800;
+  font-size: clamp(1.9rem, 7vw, 3.6rem);
+  letter-spacing: 0.07em;
+  color: var(--text-main);
+  text-shadow: 0 6px 30px rgba(0, 0, 0, 0.9),
+               0 0 40px var(--cinematic-glow, rgba(212, 148, 58, 0.35));
+}
+
+.phase-cinematic-line {
+  font-family: var(--font-story);
+  font-style: italic;
+  font-size: clamp(0.95rem, 2.4vw, 1.2rem);
+  color: var(--text-soft);
+}
+
+/* Hairline that draws out from the centre beneath the copy. */
+.phase-cinematic-rule {
+  position: absolute;
+  bottom: calc(50% - 78px);
+  height: 1px;
+  width: min(340px, 62vw);
+  background: linear-gradient(90deg, transparent, var(--cinematic-accent, var(--amber)), transparent);
+  animation: cinematicRule var(--cinematic-duration, 2000ms) var(--ease) both;
+}
+
+@keyframes cinematicFade {
+  0%        { opacity: 0; }
+  12%, 68%  { opacity: 1; }
+  100%      { opacity: 0; }
+}
+
+@keyframes cinematicVeil {
+  0%        { opacity: 0; }
+  22%, 62%  { opacity: 1; }
+  100%      { opacity: 0; }
+}
+
+@keyframes cinematicSweep {
+  0%   { transform: translateX(-38%) skewX(-8deg); opacity: 0; }
+  30%  { opacity: 1; }
+  100% { transform: translateX(38%) skewX(-8deg); opacity: 0; }
+}
+
+@keyframes cinematicCopy {
+  0%       { opacity: 0; transform: translateY(16px) scale(0.97); letter-spacing: 0.2em; }
+  26%      { opacity: 1; transform: translateY(0) scale(1); }
+  70%      { opacity: 1; transform: translateY(0) scale(1); }
+  100%     { opacity: 0; transform: translateY(-10px) scale(1.02); }
+}
+
+@keyframes cinematicRule {
+  0%       { opacity: 0; transform: scaleX(0.1); }
+  34%      { opacity: 1; transform: scaleX(1); }
+  72%      { opacity: 1; transform: scaleX(1); }
+  100%     { opacity: 0; transform: scaleX(1.1); }
+}
+
+/* Per-act palettes. Night falls cold and blue; dawn breaks warm; the trial
+   sequence runs progressively bloodier as the stakes rise. */
+.phase-cinematic.tone-night {
+  --cinematic-ray: rgba(120, 150, 235, 0.2);
+  --cinematic-accent: var(--moon);
+  --cinematic-glow: rgba(140, 170, 255, 0.4);
+}
+.phase-cinematic.tone-night .phase-cinematic-veil {
+  background: radial-gradient(circle at 50% 40%, rgba(20, 26, 54, 0.5) 8%, rgba(2, 3, 10, 0.94) 74%);
+}
+
+.phase-cinematic.tone-dawn {
+  --cinematic-ray: rgba(255, 196, 110, 0.26);
+  --cinematic-accent: var(--amber-glow);
+  --cinematic-glow: rgba(240, 184, 78, 0.45);
+}
+.phase-cinematic.tone-dawn .phase-cinematic-veil {
+  background: radial-gradient(circle at 50% 78%, rgba(122, 77, 22, 0.42) 4%, rgba(6, 4, 10, 0.9) 70%);
+}
+
+.phase-cinematic.tone-accusation {
+  --cinematic-ray: rgba(255, 211, 131, 0.2);
+  --cinematic-accent: #ffd383;
+  --cinematic-glow: rgba(255, 211, 131, 0.36);
+}
+
+.phase-cinematic.tone-defense {
+  --cinematic-ray: rgba(200, 216, 255, 0.16);
+  --cinematic-accent: var(--moon);
+  --cinematic-glow: rgba(200, 216, 255, 0.32);
+}
+
+.phase-cinematic.tone-trial {
+  --cinematic-ray: rgba(224, 64, 64, 0.24);
+  --cinematic-accent: var(--crimson-glow);
+  --cinematic-glow: rgba(224, 64, 64, 0.44);
+}
+.phase-cinematic.tone-trial .phase-cinematic-veil {
+  background: radial-gradient(circle at 50% 45%, rgba(60, 8, 8, 0.44) 8%, rgba(6, 2, 3, 0.94) 74%);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .phase-cinematic { display: none; }
+  .center-timer.phase-timer.is-critical { animation: none; }
+  .phase-timer-sweep { transition: none; }
+}
+
+/* ── Reconnect badge ─────────────────────────────────────────
+   Distinct from the flat "Offline" state: a pulsing pip plus a live
+   countdown, so the table can tell "wait for them" from "they're gone".
+   ============================================================ */
+.player-badge.reconnect-badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  color: var(--moon);
+  background: rgba(120, 150, 235, 0.14);
+  border: 1px solid rgba(140, 170, 255, 0.34);
+}
+
+.reconnect-pip {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: var(--moon);
+  box-shadow: 0 0 8px rgba(140, 170, 255, 0.9);
+  animation: reconnectPulse 1.2s ease-in-out infinite;
+}
+
+@keyframes reconnectPulse {
+  0%, 100% { opacity: 0.35; transform: scale(0.82); }
+  50%      { opacity: 1;    transform: scale(1); }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .reconnect-pip { animation: none; opacity: 0.9; }
+}
+
+/* ── The Chronicle ───────────────────────────────────────────
+   Post-game timeline. Grouped into acts so it reads as chapters,
+   with night and day acts tinted to match the phases they record.
+   ============================================================ */
+.chronicle {
+  margin-top: 1.6rem;
+  text-align: left;
+}
+
+.chronicle-heading {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  color: var(--amber-glow);
+  letter-spacing: 0.1em;
+  margin-bottom: 4px;
+}
+
+.chronicle-sub {
+  font-family: var(--font-story);
+  font-style: italic;
+  font-size: 0.9rem;
+  color: var(--text-muted);
+  margin-bottom: 14px;
+}
+
+.chronicle-acts {
+  list-style: none;
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+}
+
+/* The rail down the left edge ties the acts into one thread. */
+.chronicle-act {
+  position: relative;
+  padding-left: 16px;
+  border-left: 2px solid var(--chronicle-rail, rgba(212, 148, 58, 0.3));
+}
+
+.chronicle-act.is-night { --chronicle-rail: rgba(140, 170, 255, 0.34); }
+.chronicle-act.is-day   { --chronicle-rail: rgba(212, 148, 58, 0.34); }
+
+.chronicle-act-head {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-family: var(--font-display);
+  font-size: 0.76rem;
+  font-weight: 700;
+  letter-spacing: 0.18em;
+  text-transform: uppercase;
+  color: var(--chronicle-head, var(--amber));
+  margin-bottom: 7px;
+}
+
+.chronicle-act.is-night .chronicle-act-head { --chronicle-head: var(--moon); }
+
+.chronicle-entries {
+  list-style: none;
+  display: flex;
+  flex-direction: column;
+  gap: 7px;
+}
+
+.chronicle-entry {
+  display: flex;
+  align-items: flex-start;
+  gap: 9px;
+  padding: 8px 11px;
+  border-radius: 9px;
+  background: rgba(255, 255, 255, 0.032);
+  border: 1px solid rgba(255, 255, 255, 0.05);
+}
+
+.chronicle-entry-icon {
+  display: inline-flex;
+  flex-shrink: 0;
+  margin-top: 1px;
+  color: var(--chronicle-tone, var(--text-soft));
+}
+
+.chronicle-entry.tone-blood   { --chronicle-tone: var(--crimson-glow); }
+.chronicle-entry.tone-magic   { --chronicle-tone: var(--violet); }
+.chronicle-entry.tone-amber   { --chronicle-tone: var(--amber-glow); }
+.chronicle-entry.tone-green   { --chronicle-tone: var(--emerald-glow); }
+.chronicle-entry.tone-gold    { --chronicle-tone: var(--amber-soft); }
+.chronicle-entry.tone-neutral { --chronicle-tone: var(--moon); }
+
+.chronicle-entry-body {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  min-width: 0;
+}
+
+.chronicle-entry-text {
+  font-size: 0.9rem;
+  color: var(--text-main);
+  line-height: 1.4;
+}
+
+.chronicle-entry-note {
+  font-family: var(--font-story);
+  font-style: italic;
+  font-size: 0.84rem;
+  color: var(--chronicle-tone, var(--text-muted));
+  opacity: 0.85;
+}
+
+/* The opening lineup renders as chips rather than a sentence. */
+.chronicle-lineup {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 5px;
+  margin-top: 4px;
+}
+
+.chronicle-seat {
+  display: inline-flex;
+  align-items: baseline;
+  gap: 5px;
+  padding: 3px 8px;
+  border-radius: 999px;
+  background: rgba(0, 0, 0, 0.34);
+  border: 1px solid rgba(255, 255, 255, 0.07);
+  font-size: 0.76rem;
+  color: var(--text-soft);
+}
+
+.chronicle-seat strong {
+  font-family: var(--font-display);
+  font-size: 0.74rem;
+  letter-spacing: 0.02em;
+}
+
+@media (max-width: 640px) {
+  .chronicle-entry-text { font-size: 0.86rem; }
+  .chronicle-act { padding-left: 12px; }
+}
+
+/* Ghost chat: the letter allowance is the whole mechanic, so say so plainly. */
+.ghost-chat-note {
+  margin-top: 6px;
+  font-family: var(--font-story);
+  font-style: italic;
+  font-size: 0.82rem;
+  color: var(--text-muted);
+}
+
+/* ============================================================
+   QUICK GUIDE — first-run explainer
+   Five cards on the actual loop of a round. Skippable at every
+   step; shown once and reopenable from the lobby afterwards.
+   ============================================================ */
+.guide-backdrop {
+  position: fixed;
+  inset: 0;
+  z-index: 120;
+  display: grid;
+  place-items: center;
+  padding: 20px;
+  background: rgba(4, 2, 8, 0.82);
+  backdrop-filter: blur(6px);
+  animation: guideFade 240ms var(--ease) both;
+}
+
+.guide-card {
+  --guide-tone: var(--amber-glow);
+  position: relative;
+  width: min(460px, 100%);
+  padding: 30px 28px 22px;
+  border-radius: 18px;
+  text-align: center;
+  background: var(--bg-panel-strong);
+  border: 1px solid var(--border);
+  box-shadow: var(--shadow-heavy), 0 0 60px -20px var(--guide-tone);
+  animation: guideCardIn 320ms var(--ease-spring) both;
+}
+
+.guide-card.tone-violet  { --guide-tone: var(--violet); }
+.guide-card.tone-moon    { --guide-tone: var(--moon); }
+.guide-card.tone-amber   { --guide-tone: var(--amber-glow); }
+.guide-card.tone-crimson { --guide-tone: var(--crimson-glow); }
+.guide-card.tone-gold    { --guide-tone: var(--amber-soft); }
+
+.guide-skip {
+  position: absolute;
+  top: 12px;
+  right: 14px;
+  padding: 6px 12px;
+  min-height: 32px;
+  border: none;
+  border-radius: 8px;
+  background: transparent;
+  color: var(--text-muted);
+  font-size: 0.78rem;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  cursor: pointer;
+  transition: color 180ms var(--ease);
+}
+.guide-skip:hover { color: var(--text-main); }
+
+.guide-icon {
+  display: grid;
+  place-items: center;
+  width: 58px;
+  height: 58px;
+  margin: 0 auto 14px;
+  border-radius: 50%;
+  color: var(--guide-tone);
+  background: color-mix(in srgb, var(--guide-tone) 12%, transparent);
+  border: 1px solid color-mix(in srgb, var(--guide-tone) 34%, transparent);
+}
+
+.guide-kicker {
+  display: block;
+  font-size: 0.66rem;
+  font-weight: 600;
+  letter-spacing: 0.3em;
+  text-transform: uppercase;
+  color: var(--guide-tone);
+  margin-bottom: 6px;
+}
+
+.guide-title {
+  font-family: var(--font-display);
+  font-size: 1.5rem;
+  color: var(--text-main);
+  margin-bottom: 10px;
+}
+
+.guide-body {
+  font-family: var(--font-story);
+  font-size: 1.04rem;
+  line-height: 1.55;
+  color: var(--text-soft);
+  margin-bottom: 20px;
+}
+
+.guide-dots {
+  display: flex;
+  justify-content: center;
+  gap: 7px;
+  margin-bottom: 18px;
+}
+
+.guide-dot {
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: rgba(255, 255, 255, 0.16);
+  transition: background 240ms var(--ease), width 240ms var(--ease);
+}
+.guide-dot.is-current {
+  width: 20px;
+  border-radius: 999px;
+  background: var(--guide-tone);
+}
+
+.guide-actions {
+  display: flex;
+  gap: 10px;
+  justify-content: center;
+}
+.guide-actions button {
+  min-width: 116px;
+  min-height: 42px;
+}
+.guide-actions button:disabled {
+  opacity: 0.4;
+  cursor: not-allowed;
+}
+
+@keyframes guideFade { from { opacity: 0; } to { opacity: 1; } }
+@keyframes guideCardIn {
+  from { opacity: 0; transform: translateY(18px) scale(0.96); }
+  to   { opacity: 1; transform: translateY(0) scale(1); }
+}
+
+@media (max-width: 480px) {
+  .guide-card { padding: 26px 20px 18px; }
+  .guide-title { font-size: 1.3rem; }
+  .guide-body { font-size: 0.98rem; }
+  .guide-actions button { min-width: 0; flex: 1; }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .guide-backdrop, .guide-card { animation: none; }
+}
+
+/* ── Touch targets ───────────────────────────────────────────
+   Anything a finger has to hit needs about 44px. The seat action
+   buttons were rendering at 20-24px, and a mis-tap there kills a
+   player, so they get a transparent hit area around the glyph.
+   ============================================================ */
+.seat-kick-btn,
+.seat-execute-btn {
+  position: relative;
+}
+.seat-kick-btn::after,
+.seat-execute-btn::after {
+  content: '';
+  position: absolute;
+  top: 50%;
+  left: 50%;
+  width: 44px;
+  height: 44px;
+  transform: translate(-50%, -50%);
+}
+
+.game-header button,
+.header-icon-btn {
+  min-width: 40px;
+  min-height: 42px;
+}

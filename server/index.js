@@ -136,6 +136,13 @@ io.on('connection', (socket) => {
     }
   });
 
+  socket.on('skipNight', () => {
+    const game = rooms[socket.roomId];
+    if (game) {
+      game.skipNight(socket.id);
+    }
+  });
+
   socket.on('submitTrialVote', (choice) => {
     const game = rooms[socket.roomId];
     if (game) {
@@ -257,34 +264,27 @@ io.on('connection', (socket) => {
       });
   });
 
-  // Ghost chat: dead Ghost-original players type a single letter per day,
-  // visible to everyone in the room.
+  // Ghost chat: a lingering spirit leaves the village one letter per day. The
+  // rule itself lives in the engine — this only carries the message across.
   socket.on('ghostMessage', (rawText) => {
       if (!rateLimit(socket, 'ghostMessage', 4, 5000)) return;
       const game = rooms[socket.roomId];
-      if (!game || !game.canUseGhostChat(socket.id)) return;
-      const raw = typeof rawText === 'string' ? rawText.trim() : '';
-      if (!raw) return;
-      // Single visible character per emission per the role's card text.
-      const letter = [...raw][0] || '';
-      if (!letter || !letter.match(/[\p{L}\p{N}\p{P}\p{S}]/u)) return;
-      const pInfo = game.players.find(p => p.socketId === socket.id);
-      if (!pInfo) return;
-      io.to(socket.roomId).emit('ghostChatMessage', {
-          sender: pInfo.name,
-          senderId: pInfo.id,
-          letter,
-          ts: Date.now(),
-      });
+      if (!game) return;
+      game.handleGhostMessage(socket.id, rawText);
   });
 
   socket.on('disconnect', () => {
     console.log(`User disconnected: ${socket.id}`);
     const game = rooms[socket.roomId];
     if (game) {
+      // Read the grace before removePlayer, since a collapsing session can flip
+      // the phase back to lobby and shorten it.
+      const cleanupDelay = game.getReconnectGraceMs() + 10000;
       game.removePlayer(socket.id);
       // Always schedule cleanup. This catches host-leave resets where bots are
-      // removed asynchronously after the reconnect grace window.
+      // removed asynchronously after the reconnect grace window. The room must
+      // outlive the reconnect window, or a mid-game refresh finds nothing left
+      // to rejoin.
       setTimeout(() => {
         if (
           rooms[socket.roomId]
@@ -294,7 +294,7 @@ io.on('connection', (socket) => {
           delete rooms[socket.roomId];
           broadcastRoomsList();
         }
-      }, 12000);
+      }, cleanupDelay);
       broadcastRoomsList();
     }
   });

@@ -13,8 +13,9 @@ const WAKE_ORDER = [
   'Werewolf',
   'Alpha Wolf',
   'Mystic Wolf',
-  'Wolf Cub',
-  'Lone Wolf',
+  // Wolf Cub and Lone Wolf deliberately have no wake of their own — both hunt
+  // within the Werewolf phase, and a separate entry only bought them an empty
+  // turn. Wolf Cub's power is posthumous; Lone Wolf's is a win condition.
   'Minion',
   'Sorceress',
   'Mason',
@@ -47,8 +48,13 @@ const NO_WAKE_ROLES = new Set([
   'Cursed',
   'Diseased',
   'Tough Guy',
-  // Ghost removed as a starting role — every dead player now becomes a ghost-chat
-  // participant. See canUseGhostChat() for the new logic.
+  // Both hunt inside the Werewolf phase (see WEREWOLF_WAKE_ROLES). Listed here
+  // so they cannot reach the wake queue by the fallback route either — a wake of
+  // their own is an empty turn, since Wolf Cub's power is posthumous and Lone
+  // Wolf's is a win condition.
+  'Wolf Cub',
+  'Lone Wolf',
+  // Ghost is not a dealable role at all — lingering is rolled for on death.
   'Family Man',
   'Windy Wendy',
   'Defender-er',
@@ -82,6 +88,10 @@ const FIRST_NIGHT_ONLY_WAKE_ROLES = new Set([
 ]);
 
 const THIRD_NIGHT_ONLY_WAKE_ROLES = new Set(['Drunk']);
+
+// Roles the Alpha Wolf's spare card cannot claim — each answers to its own
+// faction and cannot be recruited into the pack.
+const ALPHA_CONVERSION_IMMUNE = new Set(['Vampire', 'Cult Leader', 'Cthulhu']);
 
 const WEREWOLF_ROLES = new Set(['Werewolf', 'Alpha Wolf', 'Mystic Wolf', 'Dream Wolf', 'Wolverine', 'Wolf Cub', 'Lone Wolf']);
 const WEREWOLF_WAKE_ROLES = new Set(['Werewolf', 'Alpha Wolf', 'Mystic Wolf', 'Wolverine', 'Wolf Cub', 'Lone Wolf']);
@@ -166,8 +176,9 @@ const SUPPORTED_ROLES = new Set([
   'Cursed',
   'Cult Leader',
   'Diseased',
-  // 'Ghost' is no longer a deck role — the ghost-chat ability now triggers on death
-  // for every player (see canUseGhostChat).
+  // 'Ghost' is deliberately absent: lingering is rolled for on death, not dealt.
+  // Leaving it selectable handed players a card with art, a name, and no
+  // behaviour whatsoever.
   'Lone Wolf',
   'Old Hag',
   'Spellcaster',
@@ -190,6 +201,36 @@ const clampNumber = (value, fallback, min, max) => {
   return Math.min(max, Math.max(min, parsed));
 };
 
+// A player reading a reveal result holds the night queue open until they hit
+// Continue. That wait is generous but must always be bounded — otherwise a
+// closed tab or an AFK player freezes the whole room in the night phase.
+const NIGHT_REVIEW_GRACE_MS = 25000;
+
+// Phases in which an accusation is live. Outside these the accused id is stale
+// bookkeeping and is withheld from the client.
+const ACCUSED_VISIBLE_PHASES = new Set(['accusation', 'defense', 'trial', 'end']);
+
+// How long a seat is held for a player who dropped. In the lobby a seat is cheap
+// and should free up fast. Mid-game it is anything but — the player holds a card
+// the whole table is reasoning about — so a locked phone, a tab refresh or a
+// tunnel gets a generous window to come back to the same game.
+const LOBBY_RECONNECT_GRACE_MS = 5000;
+const GAME_RECONNECT_GRACE_MS = 120000;
+
+// The night queue is a separate concern from the seat and cannot wait out the
+// full window, so a dropped player's hold on it is released much sooner.
+const NIGHT_HOLD_RELEASE_MS = 5000;
+
+// The Hunter's last shot halts the entire game on one player's click, so it
+// gets the same treatment as a night reveal: generous, but never unbounded.
+const HUNTER_REVENGE_GRACE_MS = 30000;
+
+// Death does not make you a ghost — it gives you a chance at it. Every death
+// rolls independently, so a game may raise none, or several. Rarity is the
+// point: a single letter from beyond is an event, not a running commentary.
+const GHOST_CHANCE = 0.1;
+const GHOST_CHAT_PHASES = new Set(['day', 'accusation', 'defense', 'trial']);
+
 class GameEngine {
   constructor(roomId, roomIo, rawIo) {
     this.roomId = roomId;
@@ -197,12 +238,6 @@ class GameEngine {
     this.rawIo = rawIo;
     this.players = [];
     this.phase = 'lobby';
-    this.roles = [];
-    this.assignments = {};
-    this.centerCards = [];
-    this.alphaWolfCard = null;
-    this.revealedCards = {};
-    this.eventLog = [];
 
     this.settings = {
       enableVillagerChat: false,
@@ -217,41 +252,49 @@ class GameEngine {
       deck: [],
     };
 
-    this.dayCount = 1;
-    this.nightQueue = [];
+    this.timer = null;
+    this.dealTimer = null;
+    this.locked = false;
+
+    // ── Bot infrastructure (host-only test mode) ──
+    this.botCounter = 0;
+    this.botTimers = new Set();
+    this.botDebugLog = []; // [{ time, bot, role, action, detail }]
+    this.botDebugMax = 200;
+    this.disconnectTimers = new Set();
+
+    this.resetGameState();
+  }
+
+  // ──────────────────────────────────────────────────────────
+  // STATE LIFECYCLE
+  //
+  // Every field scoped to a night, a day, or a game is declared and cleared in
+  // exactly one place below. New roles add their field to the matching reset and
+  // are then correct everywhere — the constructor, "play again", and a session
+  // collapsing back to the lobby all funnel through these.
+  // ──────────────────────────────────────────────────────────
+
+  // Cleared at the start of every night.
+  resetNightState() {
     this.currentNightAction = null;
     this.currentNightActors = [];
+    this.nightActionsReceived = {};
+    this.pendingNightResultAcks = {};
     this.wwKillVotes = {};
+    this.werewolfKillTarget = null;
     this.protectedPlayers = [];
     this.bodyguardGuards = new Map();
     this.jailedTargets = new Set();
     this.sentinelShielded = null;
-    this.nightActionsReceived = {};
-    this.pendingNightResultAcks = {};
-
-    // ── GPT-Roles state ──
-    this.silencedNextDay = new Set();    // Spellcaster targets — cannot speak day chat
-    this.banishedNextDay = new Set();    // Old Hag targets — cannot speak/vote
-    this.cupidLinks = {};                 // {playerId -> partnerId}
-    this.cultMembers = new Set();         // Cult Leader cult roster
-    this.cultLeaderId = null;             // Tracked for cult-win check
-    this.vampireMarks = {};               // {markedTargetId -> vampireId} (active mark)
-    this.accusationCounts = {};           // {playerId -> total accusations received}
-    this.toughGuyHit = new Set();         // Tough Guys who took a wolf hit (die next night)
-    this.wolfCubExtraKill = false;        // Set when Wolf Cub eliminated; doubles next wolf kill
-    this.wolfCubPendingExtraKill = false; // Set when Wolf Cub dies; promotes to extra kill at next night start
-    this.wolvesSkipNextNight = false;     // Set when Diseased dies to wolves
-    this.wolvesSkippingThisNight = false; // Active wolves skip status for current night
-    // Ghost-chat is now a death-conferred ability for any player — no per-deck flag.
-    // ── New role state ──
-    this.dawnBringerUsed = {};            // {pid: bool} — Dawn Bringer declaration used
-    this.dawnBringerDeclared = false;     // True when Dawn Bringer cancelled next night
-    this.disruptorTarget = {};            // {pid: targetId} — per night Disruptor target
-    this.reflectorTarget = {};            // {pid: targetId} — The Reflector mirror target
-    this.yanderObs = {};                  // {pid: obsId} — Yandere obsession target
-    this.yandereUsed = {};                // {pid: uses} — remaining activations (max 3)
-    this.yandereActiveShield = {};        // {pid: obsId} — active shield this night
-    this.cthulhuCrazed = {};             // {targetId: word} — crazed players and their forced word
+    this.witchKills = [];
+    this.witchProtectedTargets = new Set();
+    this.troublemakerKills = [];
+    this.disruptorTarget = {};   // {pid: targetId} — per night Disruptor target
+    this.reflectorTarget = {};   // {pid: targetId} — The Reflector mirror target
+    this.yandereActiveShield = {}; // {pid: obsId} — active shield this night
+    // Cthulhu madness carries night → day, then resets at the next nightfall.
+    this.cthulhuCrazed = {};     // {targetId: word} — crazed players and their forced word
 
     // ── Jailer chat state ──
     this.jailerChatActive = false;
@@ -259,24 +302,71 @@ class GameEngine {
     this.jailerTargetId = null;
     this.jailerChatMessages = [];
     this.jailerChatExpiresAt = null;
-    this.jailerChatTimer = null;
     this.jailedPlayerId = null;
+    if (this.jailerChatTimer) {
+      clearTimeout(this.jailerChatTimer);
+    }
+    this.jailerChatTimer = null;
+  }
 
-    this.timer = null;
-    this.dealTimer = null;
-    this.timeLeft = 0;
+  // Day-long carry-overs. These are applied during the day they were set and
+  // expire at the following nightfall, so they clear alongside the night reset.
+  resetDayState() {
+    this.silencedNextDay = new Set(); // Spellcaster targets — cannot speak day chat
+    this.banishedNextDay = new Set(); // Old Hag targets — cannot speak or vote
+  }
+
+  // Vote bookkeeping for one day/trial cycle.
+  resetVoteState() {
     this.accusationVotes = {};
     this.trialVotes = {};
     this.accusedId = null;
-    this.winner = null;
-    this.locked = false;
-    this.werewolfKillTarget = null;
+    // Latched from the moment a verdict commits until the next phase actually
+    // begins. The phase reads 'trial' for that entire stretch — through the
+    // execution scene and the three-second walk to nightfall — so without this
+    // a second Force Verdict re-enters and cancels the transition, leaving the
+    // game looping on a trial whose accused is already gone.
+    this.executionPending = false;
+  }
 
-    // ── Bot infrastructure (host-only test mode) ──
-    this.botCounter = 0;
-    this.botTimers = new Set();
-    this.botDebugLog = []; // [{ time, bot, role, action, detail }]
-    this.botDebugMax = 200;
+  // Full per-game reset. Leaves identity, seating, settings and bot plumbing alone.
+  resetGameState() {
+    this.roles = [];
+    this.assignments = {};
+    this.centerCards = [];
+    this.alphaWolfCard = null;
+    this.revealedCards = {};
+    this.eventLog = [];
+    this.dayCount = 1;
+    this.nightQueue = [];
+    this.chronicle = [];
+    this.chronicleAct = null;
+    this.ghosts = new Set();   // the dead who lingered
+    this.ghostLetterDay = {};  // {playerId: dayCount of their last letter}
+    this.timeLeft = 0;
+    this.phaseEndsAt = null;
+    this.phaseDuration = 0;
+    this.winner = null;
+
+    this.cupidLinks = {};                 // {playerId -> partnerId}
+    this.cultMembers = new Set();         // Cult Leader cult roster
+    this.cultLeaderId = null;             // Tracked for cult-win check
+    this.vampireMarks = {};               // {markedTargetId -> vampireId} (active mark)
+    this.accusationCounts = {};           // {playerId -> total accusations received}
+    this.toughGuyHit = new Set();         // Tough Guys who took a wolf hit (die next night)
+    this.wolfCubExtraKill = false;        // Set when Wolf Cub eliminated; doubles next wolf kill
+    this.wolfCubPendingExtraKill = false; // Set when Wolf Cub dies; promotes at next night start
+    this.wolvesSkipNextNight = false;     // Set when Diseased dies to wolves
+    this.wolvesSkippingThisNight = false; // Active wolves skip status for current night
+    this.dawnBringerUsed = {};            // {pid: bool} — Dawn Bringer declaration used
+    this.dawnBringerDeclared = false;     // True when Dawn Bringer cancelled next night
+    this.yanderObs = {};                  // {pid: obsId} — Yandere obsession target
+    this.yandereUsed = {};                // {pid: uses} — activations spent (max 3)
+    // Ghost-chat is a death-conferred ability for any player — no per-deck flag.
+
+    this.resetNightState();
+    this.resetDayState();
+    this.resetVoteState();
   }
 
   // ──────────────────────────────────────────────────────────
@@ -411,42 +501,8 @@ class GameEngine {
 
     this.phase = 'lobby';
     this.locked = false;
-    this.werewolfKillTarget = null;
-    this.roles = [];
-    this.assignments = {};
-    this.centerCards = [];
-    this.alphaWolfCard = null;
-    this.revealedCards = {};
-    this.eventLog = [];
-    this.dayCount = 1;
-    this.nightQueue = [];
-    this.currentNightAction = null;
-    this.currentNightActors = [];
-    this.wwKillVotes = {};
-    this.protectedPlayers = [];
-    this.bodyguardGuards = new Map();
-    this.jailedTargets = new Set();
-    this.sentinelShielded = null;
-    this.nightActionsReceived = {};
-    this.pendingNightResultAcks = {};
-    this.timeLeft = 0;
-    this.accusationVotes = {};
-    this.trialVotes = {};
-    this.accusedId = null;
-    this.winner = null;
     this.botCounter = 0;
-    this.silencedNextDay = new Set();
-    this.banishedNextDay = new Set();
-    this.cupidLinks = {};
-    this.cultMembers = new Set();
-    this.cultLeaderId = null;
-    this.vampireMarks = {};
-    this.accusationCounts = {};
-    this.toughGuyHit = new Set();
-    this.wolfCubExtraKill = false;
-    this.wolfCubPendingExtraKill = false;
-    this.wolvesSkipNextNight = false;
-    this.wolvesSkippingThisNight = false;
+    this.resetGameState();
 
     this.logBotEvent('System', 'HostLeave', 'session_end',
       `Host left; removed ${removedBots} bot${removedBots === 1 ? '' : 's'} and reset to lobby.`);
@@ -484,9 +540,17 @@ class GameEngine {
       .map(p => p.id);
 
     switch (role) {
+      // The Alpha's own wake is a conversion, not a bite. It has to skip the
+      // whole wolf team, not just the wolves — recruiting a Minion wastes the
+      // card, and recruiting a packmate is rejected outright.
+      case 'Alpha Wolf': {
+        const outsiders = livingOthers.filter(id => !this.isWolfTeamRole(this.assignments[id]?.currentRole)
+          && !ALPHA_CONVERSION_IMMUNE.has(this.assignments[id]?.currentRole));
+        const target = this.pickRandom(outsiders);
+        return target ? { type: 'convert', target1: target } : { type: 'view' };
+      }
       case 'Werewolf':
       case 'Wolverine':
-      case 'Alpha Wolf':
       case 'Mystic Wolf':
       case 'Dream Wolf':
       case 'Wolf Cub':
@@ -494,8 +558,8 @@ class GameEngine {
         if (!this.shouldWerewolvesHuntNow()) {
           return { type: 'view' };
         }
-        const wolves = new Set(this.getNightWerewolfIds());
-        const nonWolves = livingOthers.filter(id => !wolves.has(id));
+        // Never bite the team — wolf support roles included.
+        const nonWolves = livingOthers.filter(id => !this.isWolfTeamRole(this.assignments[id]?.currentRole));
         const target = this.pickRandom(nonWolves.length > 0 ? nonWolves : livingOthers);
         return target ? { type: 'kill', target1: target } : { type: 'view' };
       }
@@ -727,6 +791,59 @@ class GameEngine {
     return !!(playerId && this.pendingNightResultAcks[playerId]);
   }
 
+  // A night actor can only be waited on while they are able to answer. Bots always
+  // can; humans stop counting the moment they drop.
+  isNightActorResponsive(playerId) {
+    const p = this.players.find(x => x.id === playerId);
+    return !!(p && (p.connected || p.isBot));
+  }
+
+  // The set of actors the current night phase is still legitimately waiting on.
+  getPendingNightActors() {
+    const actors = this.currentNightActors.length > 0
+      ? this.currentNightActors
+      : this.getActiveActors(this.currentNightAction);
+    return actors.filter(id => !this.nightActionsReceived[id] && this.isNightActorResponsive(id));
+  }
+
+  // Bounded window for reviewing a reveal result before the night moves on itself.
+  armNightReviewTimer() {
+    this.clearTimer();
+    if (this.phase !== 'night') return;
+    this.timeLeft = Math.ceil(NIGHT_REVIEW_GRACE_MS / 1000);
+    this.phaseDuration = this.timeLeft;
+    this.phaseEndsAt = Date.now() + NIGHT_REVIEW_GRACE_MS;
+    this.timer = setTimeout(() => this.forceResolveNightReview(), NIGHT_REVIEW_GRACE_MS);
+  }
+
+  // Review window expired: auto-acknowledge everything still outstanding and advance.
+  forceResolveNightReview() {
+    if (this.phase !== 'night') return;
+    Object.keys(this.pendingNightResultAcks).forEach((pid) => {
+      delete this.pendingNightResultAcks[pid];
+      this.nightActionsReceived[pid] = true;
+      this.logBotEvent(this.getPlayerName(pid) || pid, this.currentNightAction, 'auto-continue',
+        'Review window expired; the night advanced on its own.');
+    });
+    this.clearTimer();
+    this.nextNightAction();
+  }
+
+  // A player left mid-review. Release the hold they have on the night queue so the
+  // room keeps moving, and advance immediately if they were the last one pending.
+  releaseNightHold(playerId) {
+    if (this.phase !== 'night' || !this.hasPendingNightResultAck(playerId)) return false;
+    delete this.pendingNightResultAcks[playerId];
+    this.nightActionsReceived[playerId] = true;
+    this.logBotEvent(this.getPlayerName(playerId) || playerId, this.currentNightAction,
+      'released', 'Left while reviewing; night hold released.');
+    if (this.getPendingNightActors().length === 0) {
+      this.clearTimer();
+      this.timer = setTimeout(() => this.nextNightAction(), 500);
+    }
+    return true;
+  }
+
   shouldWaitForNightResultAck(actor, payload) {
     return !!(
       actor
@@ -761,7 +878,10 @@ class GameEngine {
         type: payload.type,
         ts: Date.now(),
       };
-      this.clearTimer();
+      // Swap the phase timer for a bounded review window rather than dropping the
+      // timer entirely — the night must never depend solely on a click that may
+      // never arrive.
+      this.armNightReviewTimer();
       this.scheduleBotNightResultAck(actor.id);
     }
 
@@ -846,13 +966,80 @@ class GameEngine {
   }
 
   emitTick() {
-    this.emitToRoom('phaseTick', { phase: this.phase, timeLeft: this.timeLeft });
+    const payload = {
+      phase: this.phase,
+      timeLeft: this.timeLeft,
+      phaseEndsAt: this.phaseEndsAt,
+      phaseDuration: this.phaseDuration,
+    };
+    if (this.phase !== 'night') {
+      this.emitToRoom('phaseTick', payload);
+      return;
+    }
+    // Wake phases differ in length — the hunt runs longer than the rest — so a
+    // room-wide night countdown would tell sleeping players which role is up.
+    // Only the players actually awake for this wake get the clock.
+    this.currentNightActors.forEach((pid) => {
+      const socketId = this.getSocketId(pid);
+      if (socketId) this.emitTo(socketId, 'phaseTick', payload);
+    });
+  }
+
+  // Phase countdowns are anchored to a wall-clock deadline rather than accumulated
+  // from a per-second decrement, so a stalled event loop or a slow tick can't
+  // silently stretch a phase past its configured length.
+  startPhaseTimer(seconds, onExpire) {
+    this.clearTimer();
+    this.timeLeft = seconds;
+    // Published alongside the deadline so clients can draw a countdown arc
+    // without having to guess the span from settings — some wake phases run
+    // longer than their configured base.
+    this.phaseDuration = seconds;
+    this.phaseEndsAt = Date.now() + seconds * 1000;
+    this.timer = setInterval(() => {
+      const remaining = Math.max(0, Math.ceil((this.phaseEndsAt - Date.now()) / 1000));
+      const changed = remaining !== this.timeLeft;
+      this.timeLeft = remaining;
+      if (changed) this.emitTick();
+      if (remaining <= 0) {
+        this.clearTimer();
+        onExpire();
+      }
+    }, 250);
   }
 
   logEvent(text) {
     const message = { sender: 'System', text, ts: Date.now() };
     this.eventLog = [...this.eventLog, message].slice(-40);
     this.emitToRoom('chatMessage', message);
+  }
+
+  // ── Chronicle ──────────────────────────────────────────────
+  // The town crier feed is a rolling 40-line window built for playing: it says
+  // only what the village is allowed to know, and it scrolls away. The chronicle
+  // is its opposite — a complete ordered record, including everything hidden at
+  // the time, kept back until the end screen where the reveal is the payoff.
+  // It is never sent to a client while a game is running.
+  recordChronicle(type, text, meta = {}) {
+    this.chronicle.push({
+      day: this.dayCount,
+      // Dawn resolution runs with the phase already flipped to day, but a body
+      // found at sunrise belongs to the night that made it.
+      phase: this.chronicleAct || this.phase,
+      type,
+      text,
+      ...meta,
+      ts: Date.now(),
+    });
+    if (this.chronicle.length > 240) this.chronicle.shift();
+  }
+
+  // What killed someone, when the caller hasn't said. Good enough for the
+  // handful of exotic paths that don't name their own cause.
+  inferDeathCause() {
+    if (this.phase === 'night') return 'night';
+    if (this.phase === 'trial' || this.phase === 'accusation' || this.phase === 'defense') return 'vote';
+    return 'unknown';
   }
 
   emitPrivateNotice(playerId, payload) {
@@ -879,10 +1066,28 @@ class GameEngine {
     }
   }
 
+  // Reconnect windows outlive phases, so they are tracked separately from the
+  // phase timer — but they must still be droppable, or an abandoned room keeps
+  // the process awake for the length of its longest grace.
+  scheduleDisconnectTimer(fn, delay) {
+    const handle = setTimeout(() => {
+      this.disconnectTimers.delete(handle);
+      fn();
+    }, delay);
+    this.disconnectTimers.add(handle);
+    return handle;
+  }
+
+  clearDisconnectTimers() {
+    this.disconnectTimers.forEach(handle => clearTimeout(handle));
+    this.disconnectTimers.clear();
+  }
+
   clearAllTimers() {
     this.clearTimer();
     this.clearDealTimer();
     this.clearBotTimers();
+    this.clearDisconnectTimers();
     if (this.jailerChatTimer) {
       clearTimeout(this.jailerChatTimer);
       this.jailerChatTimer = null;
@@ -971,15 +1176,36 @@ class GameEngine {
   applyRoleChange(playerId, newRole) {
     const assignment = this.assignments[playerId];
     if (!assignment || !newRole) return;
+    const previous = assignment.currentRole;
     assignment.currentRole = newRole;
+    if (previous !== newRole) {
+      this.recordChronicle(
+        'transform',
+        `${this.getPlayerName(playerId)} turned from ${previous} into ${newRole}.`,
+        { playerId, from: previous, to: newRole },
+      );
+    }
   }
 
-  markPlayerDead(playerId, killedSet = null) {
+  markPlayerDead(playerId, killedSet = null, cause = null) {
     const assignment = this.assignments[playerId];
     if (!assignment || assignment.isDead) return false;
     assignment.isDead = true;
     this.revealedCards[playerId] = assignment.currentRole;
     if (killedSet) killedSet.add(playerId);
+    this.recordChronicle(
+      'death',
+      `${this.getPlayerName(playerId)} died — they were the ${assignment.currentRole}.`,
+      { playerId, role: assignment.currentRole, cause: cause || this.inferDeathCause() },
+    );
+    // Protection and jailing only ever describe the living. Leaving a corpse in
+    // these lists is dead state that later checks have to keep stepping around.
+    this.protectedPlayers = this.protectedPlayers.filter(id => id !== playerId);
+    this.bodyguardGuards.delete(playerId);
+    this.jailedTargets.delete(playerId);
+    if (this.sentinelShielded === playerId) this.sentinelShielded = null;
+
+    this.maybeRaiseGhost(playerId);
     this.resolveDoppelgangersForDeath(playerId);
     this.promoteApprenticeSeerOnSeerDeath(playerId);
 
@@ -1012,11 +1238,11 @@ class GameEngine {
         const rightId = ids[(idx + 1) % ids.length];
         this.logEvent(`The Mad Bomber's explosives go off! The blast catches those seated beside them.`);
         if (leftId && leftId !== playerId && this.hasLiveAssignment(leftId)) {
-          this.markPlayerDead(leftId, killedSet);
+          this.markPlayerDead(leftId, killedSet, 'bomber');
           this.logEvent(`${this.getPlayerName(leftId)} was caught in the blast (left of Mad Bomber).`);
         }
         if (rightId && rightId !== playerId && rightId !== leftId && this.hasLiveAssignment(rightId)) {
-          this.markPlayerDead(rightId, killedSet);
+          this.markPlayerDead(rightId, killedSet, 'bomber');
           this.logEvent(`${this.getPlayerName(rightId)} was caught in the blast (right of Mad Bomber).`);
         }
       }
@@ -1025,7 +1251,7 @@ class GameEngine {
     // Cupid heartbreak death
     const partnerId = this.cupidLinks[playerId];
     if (partnerId && this.hasLiveAssignment(partnerId)) {
-      this.markPlayerDead(partnerId, killedSet);
+      this.markPlayerDead(partnerId, killedSet, 'heartbreak');
       this.logEvent(`${this.getPlayerName(partnerId)} died of heartbreak — they were linked by Cupid.`);
     }
 
@@ -1156,6 +1382,18 @@ class GameEngine {
     const assignment = this.assignments[targetId];
     const role = assignment.currentRole;
 
+    // The pack does not eat its own. The hunt is chosen before the Alpha Wolf
+    // wakes, so the Alpha could convert the very player already marked to die —
+    // and the new packmate was then eaten at dawn by the wolves who recruited
+    // them. Any conversion landing between the choice and the dawn (Alpha Wolf,
+    // Cursed, anything added later) fizzles the bite instead.
+    if (this.isWolfTeamRole(role)) {
+      this.logEvent(`The pack closed on ${targetName} and found one of their own. No blood was spilled.`);
+      this.logBotEvent('System', 'Werewolf', 'fizzled',
+        `${targetName} (${role}) was already pack when the hunt resolved.`);
+      return false;
+    }
+
     // The Reflector's mirror: any attacker targeting a mirrored player strikes themselves.
     // For the wolf pack — which has no single attacker — the bounce hits a random living wolf.
     if (this.isReflectorMirrored(targetId)) {
@@ -1168,7 +1406,7 @@ class GameEngine {
       if (victim) {
         const victimName = this.getPlayerName(victim);
         this.logEvent(`The Reflector's mirror flung the attack back — ${victimName} fell to the pack's own fangs.`);
-        this.markPlayerDead(victim, killedSet);
+        this.markPlayerDead(victim, killedSet, 'mirror');
       } else {
         this.logEvent(`The Reflector's mirror flashed — but the wolves vanished into the dark before it could strike them.`);
       }
@@ -1210,7 +1448,7 @@ class GameEngine {
     }
 
     this.maybeEmitWolverineWarning(targetId);
-    if (this.markPlayerDead(targetId, killedSet)) {
+    if (this.markPlayerDead(targetId, killedSet, 'wolves')) {
       this.logEvent(`${targetName} was killed during the night.`);
 
       // Diseased: wolves cannot kill the next night.
@@ -1230,7 +1468,7 @@ class GameEngine {
     [...this.toughGuyHit].forEach((id) => {
       this.toughGuyHit.delete(id);
       if (!this.hasLiveAssignment(id)) return;
-      if (this.markPlayerDead(id, deadSet)) {
+      if (this.markPlayerDead(id, deadSet, 'wounds')) {
         this.logEvent(`${this.getPlayerName(id)} (the Tough Guy) finally fell from the wolf wound.`);
       }
     });
@@ -1258,9 +1496,18 @@ class GameEngine {
         });
         return null;
       }
+      const wasAway = !existing.connected;
       existing.socketId = socketId;
       existing.connected = true;
       existing.name = name;
+      existing.disconnectedAt = null;
+      existing.reconnectDeadline = null;
+      if (wasAway) {
+        this.logEvent(`${existing.name} reconnected.`);
+        // A room left without a connected human still needs someone at the
+        // controls when the first player walks back in.
+        if (!this.players.some(x => x.isHost && x.connected && !x.isBot)) this.reassignHost();
+      }
       this.emitTo(socketId, 'sessionToken', { token: existing.sessionToken });
       this.broadcastState();
       return existing.sessionToken;
@@ -1288,32 +1535,76 @@ class GameEngine {
     return newToken;
   }
 
+  isGameInProgress() {
+    return this.phase !== 'lobby' && this.phase !== 'end';
+  }
+
+  countConnectedHumans() {
+    return this.players.filter(p => p.connected && !p.isBot).length;
+  }
+
+  // Host is a control role, not a seat. When the holder drops it moves on at once
+  // so the room is never left without controls — losing the host must not cost
+  // anyone their game.
+  reassignHost() {
+    const next = this.players.find(p => p.connected && !p.isBot);
+    if (!next || next.isHost) return false;
+    this.players.forEach((p) => { p.isHost = false; });
+    next.isHost = true;
+    this.logEvent(`${next.name} is now the host.`);
+    this.logBotEvent('System', 'Host', 'transfer', `Host duty passed to ${next.name}.`);
+    return true;
+  }
+
+  getReconnectGraceMs() {
+    return this.isGameInProgress() ? GAME_RECONNECT_GRACE_MS : LOBBY_RECONNECT_GRACE_MS;
+  }
+
   removePlayer(socketId) {
     const p = this.players.find(x => x.socketId === socketId);
-    if (p) {
-      const wasHumanHost = p.isHost && !p.isBot;
-      p.connected = false;
-      this.broadcastState();
+    if (!p) return;
 
-      setTimeout(() => {
-        // Only process if the player hasn't reconnected
-        if (!p.connected) {
-          if (wasHumanHost) {
-            this.endSessionBecauseHostLeft(p.id);
-            return;
-          }
-          if (this.phase === 'lobby') {
-            this.players = this.players.filter(x => x.id !== p.id);
-          }
-          if (this.players.length > 0 && !this.players.find(x => x.isHost && x.connected && !x.isBot)) {
-            this.players.forEach(x => x.isHost = false);
-            const first = this.players.find(x => x.connected && !x.isBot);
-            if (first) first.isHost = true;
-          }
-          this.broadcastState();
-        }
-      }, 5000);
+    p.connected = false;
+    p.disconnectedAt = Date.now();
+    const grace = this.getReconnectGraceMs();
+    p.reconnectDeadline = p.disconnectedAt + grace;
+
+    // Hand off the controls straight away rather than waiting out the grace.
+    if (p.isHost && !p.isBot) this.reassignHost();
+    this.broadcastState();
+
+    // The night is on its own clock — it cannot sit idle for the whole seat
+    // window, so any hold this player had on the queue goes much sooner.
+    this.scheduleDisconnectTimer(() => {
+      if (p.connected) return;
+      if (this.releaseNightHold(p.id)) this.broadcastState();
+    }, NIGHT_HOLD_RELEASE_MS);
+
+    this.scheduleDisconnectTimer(() => {
+      if (p.connected) return;
+      this.retireSeat(p);
+    }, grace);
+  }
+
+  // The reconnect window expired without them coming back.
+  retireSeat(p) {
+    p.reconnectDeadline = null;
+
+    if (this.countConnectedHumans() === 0) {
+      // Nobody is left to play. Collapse the room rather than leaving a game
+      // suspended around an empty table.
+      this.endSessionBecauseHostLeft(p.id);
+      return;
     }
+
+    if (this.phase === 'lobby' || this.phase === 'end') {
+      this.players = this.players.filter(x => x.id !== p.id);
+    }
+    // Mid-game the seat stays. They still hold a card the table is reasoning
+    // about and can still be voted out; they simply stop being waited on, and
+    // the door is left open if they return.
+    if (!this.players.some(x => x.isHost && x.connected && !x.isBot)) this.reassignHost();
+    this.broadcastState();
   }
 
   updateSettings(socketId, newSettings) {
@@ -1410,6 +1701,7 @@ class GameEngine {
       }
     }
 
+    const nightClockVisible = this.phase !== 'night' || !!myActiveRole;
     const isWerewolfTurn = this.phase === 'night' && this.currentNightAction === 'Werewolf' && myActiveRole === 'Werewolf';
     const currentActors = this.phase === 'night' && this.currentNightAction
       ? (this.currentNightActors.length > 0 ? this.currentNightActors : this.getActiveActors(this.currentNightAction))
@@ -1478,12 +1770,14 @@ class GameEngine {
     // Check if this player is the Dawn Bringer and if they haven't used their ability yet
     const isDawnBringer = playerId && this.assignments[playerId]?.currentRole === 'Dawn Bringer';
     const dawnBringerAvailable = isDawnBringer && !this.dawnBringerUsed[playerId];
-    // Ghost panel is always visible from day 1 onward, since any death now
-    // confers ghost-chat. canSpeak is still gated per-player on isDead + day phase.
-    const ghostDayPhases = ['day', 'accusation', 'defense', 'trial'];
-    const ghostInfo = ghostDayPhases.includes(this.phase) ? {
+    // Letters are broadcast to the whole village, so the panel stays visible to
+    // everyone; only a ghost with a letter still in hand gets the input.
+    const ghostInfo = GHOST_CHAT_PHASES.has(this.phase) ? {
       active: true,
-      canSpeak: !!(playerId && this.canUseGhostChat(this.players.find(p => p.id === playerId)?.socketId)),
+      isGhost: this.isGhost(playerId),
+      canSpeak: !!(playerId && this.canUseGhostChat(this.getSocketId(playerId))),
+      letterSpent: this.isGhost(playerId) && !this.hasGhostLetterLeft(playerId),
+      ghostCount: this.ghosts.size,
     } : null;
 
     const isJailerChatParticipant = !!(
@@ -1510,10 +1804,13 @@ class GameEngine {
       isJailerChatParticipant,
       players: this.players.map(p => ({
         id: p.id,
-        socketId: p.socketId,
+        // Deliberately no socketId — clients address each other by player id, and
+        // broadcasting connection handles is needless surface.
         name: p.name,
         isHost: p.isHost,
         connected: p.connected,
+        // So the table can tell "hang on, they're coming back" from "they left".
+        reconnectDeadline: p.connected ? null : (p.reconnectDeadline || null),
         isBot: !!p.isBot,
         isDead: this.assignments[p.id]?.isDead || false,
         hasVoted: this.phase === 'accusation'
@@ -1568,15 +1865,24 @@ class GameEngine {
         : undefined,
       centerCards: center,
       timeLeft: this.timeLeft,
+      // Gated exactly like currentNightAction: at night the clock is only for the
+      // players who are awake, since the wake length identifies the phase.
+      phaseEndsAt: nightClockVisible ? this.phaseEndsAt : null,
+      phaseDuration: nightClockVisible ? this.phaseDuration : 0,
       currentNightAction: myActiveRole ? this.currentNightAction : null,
       nightPendingContinue: !!(playerId && this.hasPendingNightResultAck(playerId)),
       publicAssignments,
+      // Held back entirely until the game is over — it contains everything that
+      // was hidden while it mattered.
+      chronicle: isEnd ? this.chronicle : [],
       winner: this.winner,
       settings: this.settings,
       wwKillVotes: isWerewolfTurn ? this.wwKillVotes : {},
       nightProgress,
       voteProgress,
-      accusedId: this.accusedId,
+      // Only meaningful while someone is actually on trial; gating it keeps a
+      // finished day's accusation from leaking into the next night's state.
+      accusedId: ACCUSED_VISIBLE_PHASES.has(this.phase) ? this.accusedId : null,
       myAccusationVote,
       myTrialVote,
       trialTally,
@@ -1772,6 +2078,8 @@ class GameEngine {
     this.clearAllTimers();
     this.players = seatedPlayers;
     const n = this.players.length;
+    // Deck validation happens before the reset so a rejected start leaves the
+    // previous game's end screen intact.
     const normalizedDeck = this.normalizeDeck(n);
     if (!normalizedDeck) {
       const message = this.settings.deckPreset === 'alin'
@@ -1784,9 +2092,9 @@ class GameEngine {
       });
       return false;
     }
+    this.resetGameState();
     this.roles = normalizedDeck;
 
-    this.assignments = {};
     for (let i = 0; i < n; i++) {
       const role = this.roles[i];
       this.assignments[this.players[i].id] = {
@@ -1807,39 +2115,19 @@ class GameEngine {
 
     this.centerCards = [this.roles[n], this.roles[n + 1], this.roles[n + 2]];
     this.alphaWolfCard = this.roles.includes('Alpha Wolf') ? 'Werewolf' : null;
-    this.revealedCards = {};
-    this.eventLog = [];
-    this.dayCount = 1;
-    this.winner = null;
-    this.nightActionsReceived = {};
-    this.pendingNightResultAcks = {};
-    this.currentNightActors = [];
-    this.currentNightAction = null;
-    this.silencedNextDay = new Set();
-    this.banishedNextDay = new Set();
-    this.cupidLinks = {};
-    this.cultMembers = new Set();
+    // The cult opens with its leader already inside it.
     this.cultLeaderId = this.players.find(p => this.assignments[p.id]?.originalRole === 'Cult Leader')?.id || null;
     if (this.cultLeaderId) this.cultMembers.add(this.cultLeaderId);
-    this.vampireMarks = {};
-    this.accusationCounts = {};
-    this.toughGuyHit = new Set();
-    this.wolfCubExtraKill = false;
-    this.wolfCubPendingExtraKill = false;
-    this.wolvesSkipNextNight = false;
-    this.wolvesSkippingThisNight = false;
-    this.dawnBringerUsed = {};
-    this.dawnBringerDeclared = false;
-    this.yanderObs = {};
-    this.yandereUsed = {};
-    this.yandereActiveShield = {};
-    this.disruptorTarget = {};
-    this.reflectorTarget = {};
-    this.cthulhuCrazed = {};
 
-    // Ghost is no longer a starting role. Any player who dies during the game gains
-    // the ghost-chat ability automatically — see canUseGhostChat() below.
     this.phase = 'dealing';
+    this.recordChronicle('open', `${n} players took their seats.`, {
+      lineup: this.players.map(p => ({
+        playerId: p.id,
+        name: p.name,
+        role: this.assignments[p.id].originalRole,
+      })),
+      centerCards: [...this.centerCards],
+    });
     this.broadcastState();
     this.dealTimer = setTimeout(() => this.startNight(), 5000);
     return true;
@@ -1849,31 +2137,11 @@ class GameEngine {
   startNight() {
     this.clearAllTimers();
     this.phase = 'night';
-    this.wwKillVotes = {};
-    this.protectedPlayers = [];
-    this.bodyguardGuards = new Map();
-    this.jailedTargets = new Set();
-    this.jailedPlayerId = null;
-    this.jailerChatActive = false;
-    this.jailerActorId = null;
-    this.jailerTargetId = null;
-    this.jailerChatMessages = [];
-    this.jailerChatExpiresAt = null;
-    if (this.jailerChatTimer) {
-      clearTimeout(this.jailerChatTimer);
-      this.jailerChatTimer = null;
-    }
-    this.sentinelShielded = null;
-    this.nightActionsReceived = {};
-    this.pendingNightResultAcks = {};
-    this.currentNightActors = [];
-    this.currentNightAction = null;
-    this.witchKills = [];
-    this.witchProtectedTargets = new Set();
-    this.troublemakerKills = [];
-    // Day-status carry-overs cleared at nightfall (Spellcaster/Old Hag last only one day).
-    this.silencedNextDay = new Set();
-    this.banishedNextDay = new Set();
+    // The trial's outcome is fully spent once the night begins.
+    this.executionPending = false;
+    this.resetNightState();
+    // Day-status carry-overs expire at nightfall (Spellcaster/Old Hag last one day).
+    this.resetDayState();
 
     // Diseased skip reset
     this.wolvesSkippingThisNight = this.wolvesSkipNextNight;
@@ -1885,12 +2153,6 @@ class GameEngine {
       this.wolfCubPendingExtraKill = false;
     }
 
-    // Reset per-night Disruptor and Reflector targets
-    this.disruptorTarget = {};
-    this.reflectorTarget = {};
-    this.yandereActiveShield = {};
-    // Cthulhu madness carries over from night \u2192 day, but resets at the next night start
-    this.cthulhuCrazed = {};
     // NOTE: dawnBringerDeclared is intentionally NOT cleared here \u2014 it must survive into
     // the dawn-bringer skip check below so the night can be cancelled. It is consumed by
     // the skip logic right after Tough Guy resolution.
@@ -2035,17 +2297,20 @@ class GameEngine {
         const actorList = actors.map(id => this.getPlayerName(id)).join(', ');
         this.logBotEvent('System', this.currentNightAction, 'wake',
           `Active: [${actorList}]`);
-        this.broadcastState();
         const killPhase = this.currentNightAction === 'Werewolf' && this.shouldWerewolvesHuntNow();
         const seconds = killPhase ? this.settings.nightActionTime + 10 : this.settings.nightActionTime;
-        this.timer = setTimeout(() => {
+        // Armed before the broadcast so the state players receive already carries
+        // this wake's deadline.
+        this.startPhaseTimer(seconds, () => {
           const waitingForReview = this.currentNightActors.some(id => this.hasPendingNightResultAck(id));
           if (waitingForReview) {
-            this.clearTimer();
+            // Give readers a bounded extension rather than cutting them off mid-result.
+            this.armNightReviewTimer();
             return;
           }
           this.nextNightAction();
-        }, seconds * 1000);
+        });
+        this.broadcastState();
         // Bots auto-act after a short, staggered delay so the host can see them on the log.
         this.scheduleBotNightActions();
         return;
@@ -2064,7 +2329,9 @@ class GameEngine {
     const actors = this.currentNightActors && this.currentNightActors.length > 0
       ? this.currentNightActors
       : this.getActiveActors(this.currentNightAction);
-    if (actors.length > 0 && actors.every(id => this.nightActionsReceived[id])) {
+    // Actors are snapshotted when the phase wakes, so anyone who dropped since then
+    // is skipped instead of holding the "everyone acted" check open.
+    if (actors.length > 0 && this.getPendingNightActors().length === 0) {
       this.clearTimer();
       this.timer = setTimeout(() => this.nextNightAction(), 1000);
     }
@@ -2254,25 +2521,32 @@ class GameEngine {
         break;
       }
 
-      case 'Alpha Wolf':
+      case 'Alpha Wolf': {
         if (!target1 || !this.hasLiveAssignment(target1) || target1 === pid) {
           this.emitActionError(socketId, 'Choose another living player.');
+          return;
+        }
+        const targetRole = this.assignments[target1].currentRole;
+        // Rejected rather than silently failed: handing the spare card to
+        // someone already on the team burns it for nothing, and the actor
+        // should get the chance to pick again.
+        if (this.isWolfTeamRole(targetRole)) {
+          this.emitActionError(socketId, 'They already run with the pack. Choose someone outside it.');
           return;
         }
         if (this.blockProtectedEffect(socketId, target1)) {
           break;
         }
-        const targetRole = this.assignments[target1].currentRole;
-        const isImmune = ['Vampire', 'Cult Leader', 'Cthulhu'].includes(targetRole);
-        if (this.alphaWolfCard && !this.isWerewolfRole(targetRole) && !isImmune) {
+        if (this.alphaWolfCard && !ALPHA_CONVERSION_IMMUNE.has(targetRole)) {
           const oldRole = targetRole;
           this.applyRoleChange(target1, this.alphaWolfCard);
           this.alphaWolfCard = oldRole;
-          this.emitActionResult(socketId,{ type: 'alphaResult', success: true });
+          this.emitActionResult(socketId, { type: 'alphaResult', success: true });
         } else {
-          this.emitActionResult(socketId,{ type: 'alphaResult', success: false });
+          this.emitActionResult(socketId, { type: 'alphaResult', success: false });
         }
         break;
+      }
 
       case 'Mystic Wolf':
         if (!target1 || !this.hasLiveAssignment(target1) || target1 === pid) {
@@ -3011,7 +3285,9 @@ class GameEngine {
     this.currentNightActors = [];
     this.pendingNightResultAcks = {};
 
+    this.chronicleAct = 'night';
     const dawnDead = this.resolveDawnKills();
+    this.chronicleAct = null;
     if (dawnDead.length > 0) {
       if (this.checkWinConditions(dawnDead, 'night')) return;
     }
@@ -3052,14 +3328,7 @@ class GameEngine {
 
     this.broadcastState();
 
-    this.timer = setInterval(() => {
-      this.timeLeft -= 1;
-      this.emitTick();
-      if (this.timeLeft <= 0) {
-        this.clearTimer();
-        this.startAccusation();
-      }
-    }, 1000);
+    this.startPhaseTimer(this.settings.discussionLength, () => this.startAccusation());
   }
 
   skipDay(socketId) {
@@ -3070,6 +3339,21 @@ class GameEngine {
     }
   }
 
+  // Host escape hatch for the night, matching the skip controls the day phases
+  // already have. Abandons the rest of the wake queue and breaks for dawn.
+  skipNight(socketId) {
+    const p = this.players.find(x => x.socketId === socketId);
+    if (!p || !p.isHost || this.phase !== 'night') return false;
+    this.clearTimer();
+    this.pendingNightResultAcks = {};
+    this.nightQueue = [];
+    this.logEvent('The host hastened the dawn.');
+    this.logBotEvent('System', 'Night', 'host-skip',
+      `Host ended night ${this.dayCount} early.`);
+    this.startDay();
+    return true;
+  }
+
   // === Phase: accusation ===
   // Players each cast one accusation vote (or skip). The single top-vote-getter
   // becomes the accused and is moved to the defense phase. Ties or no votes
@@ -3077,23 +3361,14 @@ class GameEngine {
   startAccusation() {
     this.clearTimer();
     this.phase = 'accusation';
-    this.accusationVotes = {};
-    this.trialVotes = {};
-    this.accusedId = null;
+    this.resetVoteState();
     this.timeLeft = this.settings.accusationLength;
     this.logBotEvent('System', 'Accusation', 'start',
       `D${this.dayCount} | duration: ${this.timeLeft}s`);
     this.broadcastState();
     this.scheduleBotAccusations();
 
-    this.timer = setInterval(() => {
-      this.timeLeft -= 1;
-      this.emitTick();
-      if (this.timeLeft <= 0) {
-        this.clearTimer();
-        this.resolveAccusation();
-      }
-    }, 1000);
+    this.startPhaseTimer(this.settings.accusationLength, () => this.resolveAccusation());
   }
 
   handleVote(socketId, targetId) {
@@ -3205,11 +3480,19 @@ class GameEngine {
 
     if (!topId || tied || topVotes <= 0) {
       this.logEvent('No one was accused. Night falls.');
+      this.recordChronicle('vote', tied
+        ? 'The village deadlocked and no one was accused.'
+        : 'The village named no one.', { tally });
       this.advanceToNight();
       return;
     }
 
     this.accusedId = topId;
+    this.recordChronicle(
+      'accusation',
+      `The village turned on ${this.getPlayerName(topId)} with ${topVotes} vote${topVotes === 1 ? '' : 's'}.`,
+      { playerId: topId, votes: topVotes, tally },
+    );
     this.startDefense();
   }
 
@@ -3225,14 +3508,7 @@ class GameEngine {
       `Accused: ${name} | duration: ${this.timeLeft}s`);
     this.broadcastState();
 
-    this.timer = setInterval(() => {
-      this.timeLeft -= 1;
-      this.emitTick();
-      if (this.timeLeft <= 0) {
-        this.clearTimer();
-        this.startTrial();
-      }
-    }, 1000);
+    this.startPhaseTimer(this.settings.defenseLength, () => this.startTrial());
   }
 
   skipDefense(socketId) {
@@ -3255,7 +3531,9 @@ class GameEngine {
 
   skipTrial(socketId) {
     const p = this.players.find(x => x.socketId === socketId);
-    if (p && p.isHost && this.phase === 'trial') {
+    // Once the execution is under way the verdict is already in — further
+    // presses must not restart it.
+    if (p && p.isHost && this.phase === 'trial' && !this.executionPending) {
       this.clearTimer();
       this.logBotEvent('System', 'Trial', 'skipped', 'Host force-tallied the trial.');
       this.resolveTrial();
@@ -3275,14 +3553,7 @@ class GameEngine {
     this.broadcastState();
     this.scheduleBotTrialVotes();
 
-    this.timer = setInterval(() => {
-      this.timeLeft -= 1;
-      this.emitTick();
-      if (this.timeLeft <= 0) {
-        this.clearTimer();
-        this.resolveTrial();
-      }
-    }, 1000);
+    this.startPhaseTimer(this.settings.trialLength, () => this.resolveTrial());
   }
 
   getTrialVoters() {
@@ -3376,6 +3647,7 @@ class GameEngine {
   }
 
   resolveTrial() {
+    if (this.executionPending) return;
     this.clearTimer();
     const { eliminate, save } = this.countTrialVotes();
     const accusedName = this.getPlayerName(this.accusedId);
@@ -3383,8 +3655,14 @@ class GameEngine {
       `Eliminate: ${eliminate} | Save: ${save} | Accused: ${accusedName}`);
 
     if (eliminate > save) {
+      this.recordChronicle('verdict',
+        `The village condemned ${accusedName}, ${eliminate} to ${save}.`,
+        { playerId: this.accusedId, eliminate, save });
       this.executeTrialElimination();
     } else {
+      this.recordChronicle('verdict',
+        `${accusedName} talked their way out, ${save} to ${eliminate}.`,
+        { playerId: this.accusedId, eliminate, save });
       this.logEvent(`The village voted to spare ${accusedName}.`);
       this.logBotEvent('System', 'Trial', 'spared', `${accusedName} was saved.`);
       this.accusedId = null;
@@ -3413,6 +3691,9 @@ class GameEngine {
     const targetRole = this.assignments[targetId]?.currentRole || '?';
 
     if (this.isVoteImmune(targetId)) {
+      this.recordChronicle('spared',
+        `${targetName} was condemned, then revealed as the Prince and walked free.`,
+        { playerId: targetId, role: 'Prince' });
       this.logEvent(`Votes against the Prince do not eliminate the Prince. ${targetName}'s role is revealed.`);
       this.revealedCards[targetId] = 'Prince';
       this.applyRoleChange(targetId, 'Villager'); // Sparing Prince becomes a Villager (so 2nd time kills them)
@@ -3430,6 +3711,9 @@ class GameEngine {
 
     const sceneType = this.pickExecutionScene();
     const sceneDuration = this.getExecutionSceneDuration(sceneType);
+    // The phase stays 'trial' for the length of the scene, so latch here to keep
+    // the verdict from being re-run while the kill is still pending.
+    this.executionPending = true;
     try {
       this.roomIo.emit('executionScene', {
         type: sceneType,
@@ -3442,7 +3726,7 @@ class GameEngine {
     this.clearTimer();
     this.timer = setTimeout(() => {
       const eliminatedRole = this.assignments[targetId]?.currentRole;
-      if (this.markPlayerDead(targetId, killed)) {
+      if (this.markPlayerDead(targetId, killed, 'vote')) {
         this.logEvent(`The village eliminated ${targetName}.`);
         this.logBotEvent('System', 'Trial', 'eliminated',
           `${targetName} (${targetRole}) was eliminated via ${sceneType}.`);
@@ -3450,6 +3734,7 @@ class GameEngine {
         if (eliminatedRole === 'Hunter') {
           this.pendingHunterRevenge = targetId;
           this.pendingHunterRevengeKills = [...killed];
+          this.armHunterRevengeTimer(targetId);
           this.accusedId = null;
           this.logEvent(`${targetName} was the Hunter — they may immediately take another player down.`);
           this.emitPrivateNotice(targetId, {
@@ -3504,6 +3789,7 @@ class GameEngine {
         if (eliminatedRole === 'Hunter') {
           this.pendingHunterRevenge = targetId;
           this.pendingHunterRevengeKills = [...killed];
+          this.armHunterRevengeTimer(targetId);
           this.accusedId = null;
           this.logEvent(`${targetName} was the Hunter — they may immediately take another player down.`);
           this.emitPrivateNotice(targetId, {
@@ -3525,11 +3811,50 @@ class GameEngine {
     this.broadcastState();
   }
 
+  // The Hunter's last shot pauses the whole game on one person's click. Bots
+  // never clicked at all, and a human who closed the tab hung the room for
+  // good, so the choice is both automated for bots and bounded for everyone.
+  armHunterRevengeTimer(hunterId) {
+    this.clearTimer();
+    const hunter = this.players.find(p => p.id === hunterId);
+    const delay = hunter && hunter.isBot
+      ? 900 + Math.floor(Math.random() * 600)
+      : HUNTER_REVENGE_GRACE_MS;
+    this.timeLeft = Math.ceil(delay / 1000);
+    this.phaseDuration = this.timeLeft;
+    this.phaseEndsAt = Date.now() + delay;
+    this.timer = setTimeout(() => {
+      if (this.pendingHunterRevenge !== hunterId) return;
+      let choice = SKIP_VOTE;
+      if (hunter && hunter.isBot) {
+        // A bot takes someone outside its own team where it can tell.
+        const hunterRole = this.assignments[hunterId]?.currentRole;
+        const hunterIsWolf = this.isWolfTeamRole(hunterRole);
+        const candidates = this.players
+          .filter(p => p.id !== hunterId && this.hasLiveAssignment(p.id))
+          .filter(p => hunterIsWolf
+            ? !this.isWolfTeamRole(this.assignments[p.id].currentRole)
+            : true)
+          .map(p => p.id);
+        choice = this.pickRandom(candidates) || SKIP_VOTE;
+      }
+      this.logBotEvent(this.getPlayerName(hunterId) || hunterId, 'Hunter', 'auto-shot',
+        choice === SKIP_VOTE ? 'Time ran out; the shot went wide.' : `Auto-targeted ${this.getPlayerName(choice)}.`);
+      this.applyHunterRevenge(hunterId, choice);
+    }, delay);
+  }
+
   resolveHunterRevenge(socketId, targetId) {
     const hunterId = this.pendingHunterRevenge;
     if (!hunterId) return;
     const pInfo = this.players.find(p => p.socketId === socketId);
     if (!pInfo || pInfo.id !== hunterId) return;
+    this.applyHunterRevenge(hunterId, targetId);
+  }
+
+  applyHunterRevenge(hunterId, targetId) {
+    if (this.pendingHunterRevenge !== hunterId) return;
+    this.clearTimer();
 
     const killed = new Set(this.pendingHunterRevengeKills || []);
     this.pendingHunterRevenge = null;
@@ -3655,10 +3980,15 @@ class GameEngine {
     this.logBotEvent('System', 'WinCheck', `win:${source}`,
       `Reason: ${this.winner} | killedByThisStep: ${killList} | aliveWolves: ${aliveWerewolves.length} | aliveNonWolves: ${aliveNonWerewolves.length} | alive: [${aliveList}] | dead: [${deadList}]`);
 
+    this.recordChronicle('end', this.winner, { source });
     this.phase = 'end';
     this.currentNightAction = null;
     this.currentNightActors = [];
     this.pendingNightResultAcks = {};
+    // No phase is running any more, so retire the countdown with it.
+    this.timeLeft = 0;
+    this.phaseEndsAt = null;
+    this.phaseDuration = 0;
     this.clearAllTimers();
     this.broadcastState();
     return true;
@@ -3690,18 +4020,63 @@ class GameEngine {
     return true;
   }
 
-  // ── Ghost chat: every player who has died gains the ghost-chat ability.
-  // They may post a single letter at a time, visible to the whole room, during
-  // any of the day phases. (Pre-overhaul: only a dead Ghost-original-role could
-  // speak. Now: ghost is conferred-by-death, not a deck role.)
+  // ── Ghosts ──────────────────────────────────────────────────
+  // Dying gives you a one-in-ten chance of lingering. Ghosts get a single
+  // letter per day, broadcast to the whole village — enough to point, never
+  // enough to explain. The scarcity is what gives a letter its weight; when
+  // every corpse could type freely the channel was just a second town chat.
+
+  maybeRaiseGhost(playerId) {
+    if (this.ghosts.has(playerId)) return false;
+    if (Math.random() >= GHOST_CHANCE) return false;
+    this.ghosts.add(playerId);
+    this.recordChronicle('ghost', `${this.getPlayerName(playerId)} did not rest.`, { playerId });
+    this.logEvent('A cold draught moves through the village. Something did not rest.');
+    this.emitPrivateNotice(playerId, {
+      type: 'ghostRisen',
+      title: 'You Linger',
+      message: 'Death did not take all of you. Once each day you may leave the village a single letter.',
+    });
+    return true;
+  }
+
+  isGhost(playerId) {
+    return !!playerId && this.ghosts.has(playerId);
+  }
+
+  hasGhostLetterLeft(playerId) {
+    return this.isGhost(playerId) && this.ghostLetterDay[playerId] !== this.dayCount;
+  }
+
   canUseGhostChat(socketId) {
     const player = this.players.find(p => p.socketId === socketId);
     if (!player) return false;
-    const dayPhases = ['day', 'accusation', 'defense', 'trial'];
-    if (!dayPhases.includes(this.phase)) return false;
+    if (!GHOST_CHAT_PHASES.has(this.phase)) return false;
     const assignment = this.assignments[player.id];
-    if (!assignment) return false;
-    if (!assignment.isDead) return false;
+    if (!assignment || !assignment.isDead) return false;
+    return this.isGhost(player.id);
+  }
+
+  // Lives here rather than in the socket layer so the one-letter rule is part of
+  // the game and can be tested with the rest of it.
+  handleGhostMessage(socketId, rawText) {
+    const pInfo = this.players.find(p => p.socketId === socketId);
+    if (!pInfo || !this.canUseGhostChat(socketId)) return false;
+    if (!this.hasGhostLetterLeft(pInfo.id)) return false;
+
+    const raw = typeof rawText === 'string' ? rawText.trim() : '';
+    const letter = [...raw][0] || '';
+    if (!letter || !/[\p{L}\p{N}\p{P}\p{S}]/u.test(letter)) return false;
+
+    this.ghostLetterDay[pInfo.id] = this.dayCount;
+    this.emitToRoom('ghostChatMessage', {
+      sender: pInfo.name,
+      senderId: pInfo.id,
+      letter,
+      day: this.dayCount,
+      ts: Date.now(),
+    });
+    this.broadcastState();
     return true;
   }
 

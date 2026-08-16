@@ -2625,6 +2625,105 @@ const ChronicleTimeline = ({ entries = [] }) => {
   );
 };
 
+/* ─── Quick guide ───
+   Nightfall deals from a pool of fifty-odd roles, and a first-timer landing in
+   a lobby has no idea what a wake queue is or why nothing is happening. Five
+   cards covering the actual loop, shown once, skippable at any point, and
+   reopenable from the lobby afterwards. */
+const QUICK_GUIDE_KEY = 'ww_guide_seen';
+
+const QUICK_GUIDE_STEPS = [
+  {
+    Icon: VenetianMask,
+    tone: 'violet',
+    kicker: 'Step one',
+    title: 'You are dealt a secret',
+    body: 'Your card decides what you can do at night and which side you win with. Nobody else sees it. Some cards can change hands while you sleep.',
+  },
+  {
+    Icon: Moon,
+    tone: 'moon',
+    kicker: 'Step two',
+    title: 'Night falls',
+    body: 'Roles wake one at a time. The wolves choose someone to kill. Others look, protect, swap or meddle. You only ever see your own turn.',
+  },
+  {
+    Icon: Sun,
+    tone: 'amber',
+    kicker: 'Step three',
+    title: 'Day breaks',
+    body: 'The village learns who died — and nothing else. Now everybody talks, and some of them lie. This is where the game is actually played.',
+  },
+  {
+    Icon: Vote,
+    tone: 'crimson',
+    kicker: 'Step four',
+    title: 'Someone hangs',
+    body: 'Accuse a player, hear them defend themselves, then vote to condemn or spare. Guess wrong and you have handed the wolves a free night.',
+  },
+  {
+    Icon: Crown,
+    tone: 'gold',
+    kicker: 'How it ends',
+    title: 'Last side standing',
+    body: 'The village wins when every werewolf is gone. The wolves win the moment they match or outnumber everyone else. A few odd cards want something else entirely.',
+  },
+];
+
+const QuickGuide = ({ open, onClose }) => {
+  const [step, setStep] = useState(0);
+
+  useEffect(() => {
+    if (!open) return undefined;
+    const onKey = (e) => {
+      if (e.key === 'Escape') onClose();
+      if (e.key === 'ArrowRight') setStep((s) => Math.min(s + 1, QUICK_GUIDE_STEPS.length - 1));
+      if (e.key === 'ArrowLeft') setStep((s) => Math.max(s - 1, 0));
+    };
+    window.addEventListener('keydown', onKey);
+    return () => window.removeEventListener('keydown', onKey);
+  }, [open, onClose]);
+
+  if (!open) return null;
+  const current = QUICK_GUIDE_STEPS[step];
+  const { Icon } = current;
+  const isLast = step === QUICK_GUIDE_STEPS.length - 1;
+
+  return (
+    <div className="guide-backdrop" onClick={onClose} role="dialog" aria-modal="true" aria-label="Quick guide">
+      <div className={`guide-card tone-${current.tone}`} onClick={(e) => e.stopPropagation()}>
+        <button className="guide-skip" onClick={onClose}>Skip</button>
+
+        <div className="guide-icon"><Icon size={26} /></div>
+        <span className="guide-kicker">{current.kicker}</span>
+        <h3 className="guide-title">{current.title}</h3>
+        <p className="guide-body">{current.body}</p>
+
+        <div className="guide-dots" aria-hidden="true">
+          {QUICK_GUIDE_STEPS.map((s, i) => (
+            <span key={s.title} className={`guide-dot ${i === step ? 'is-current' : ''}`} />
+          ))}
+        </div>
+
+        <div className="guide-actions">
+          <button
+            className="btn-secondary"
+            onClick={() => setStep((s) => Math.max(s - 1, 0))}
+            disabled={step === 0}
+          >
+            Back
+          </button>
+          {isLast ? (
+            <button className="btn-primary" onClick={onClose}>Let me play</button>
+          ) : (
+            <button className="btn-primary" onClick={() => setStep((s) => s + 1)}>Next</button>
+          )}
+        </div>
+      </div>
+    </div>
+  );
+};
+
 /* ─── Reconnect badge ───
    A dropped player is usually on their way back — a locked phone, a refreshed
    tab, a tunnel. Showing their seat counting down tells the table to wait
@@ -2665,6 +2764,14 @@ function App() {
   const [showCustomDeck, setShowCustomDeck] = useState(false);
   const [roleHelpRole, setRoleHelpRole] = useState(null);
   const [showRuleBook, setShowRuleBook] = useState(false);
+  // Shown once on a player's first lobby, and reopenable from there afterwards.
+  const [showQuickGuide, setShowQuickGuide] = useState(
+    () => getStoredValue(QUICK_GUIDE_KEY) !== '1'
+  );
+  const dismissQuickGuide = () => {
+    setShowQuickGuide(false);
+    try { localStorage.setItem(QUICK_GUIDE_KEY, '1'); } catch { /* noop */ }
+  };
   const [showBotConsole, setShowBotConsole] = useState(false);
   const [muted, setMuted] = useState(() => {
     const stored = getStoredValue('ww_muted');
@@ -4228,6 +4335,7 @@ function App() {
     return (
       <div className="table-scene">
         <SceneAtmosphere cinematic={phaseCinematic} />
+        <QuickGuide open={showQuickGuide} onClose={dismissQuickGuide} />
         <NoticeStack notices={privateNotices} />
         <GameHeader
           roomId={gameState.roomId}
@@ -4267,8 +4375,16 @@ function App() {
               >
                 <button
                   className="btn-secondary"
+                  onClick={() => setShowQuickGuide(true)}
+                  style={{ padding: '8px 12px', fontSize: '0.78rem', minHeight: 40 }}
+                  title="How to play"
+                >
+                  <BadgeQuestionMark size={14} />
+                </button>
+                <button
+                  className="btn-secondary"
                   onClick={() => setShowSettings(!showSettings)}
-                  style={{ padding: '8px 12px', fontSize: '0.78rem', minHeight: 36 }}
+                  style={{ padding: '8px 12px', fontSize: '0.78rem', minHeight: 40 }}
                   title="Configure Settings"
                 >
                   <Settings size={14} />
@@ -4311,6 +4427,17 @@ function App() {
               )}
             </>
           ) : (
+            <>
+            <div style={{ marginTop: '12px', pointerEvents: 'auto' }}>
+              <button
+                className="btn-secondary"
+                onClick={() => setShowQuickGuide(true)}
+                style={{ padding: '8px 14px', fontSize: '0.78rem', minHeight: 40 }}
+              >
+                <BadgeQuestionMark size={14} />
+                {' '}How to play
+              </button>
+            </div>
             <p
               style={{
                 color: 'var(--text-muted)',
@@ -4322,6 +4449,7 @@ function App() {
             >
               Awaiting the host…
             </p>
+            </>
           )}
         </RoundTable>
         {me?.isHost && showSettings && renderHostSettingsPanel()}

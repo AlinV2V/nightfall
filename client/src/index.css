@@ -4096,3 +4096,171 @@ h1, h2, h3, h4 {
   font-size: 0.82rem;
   color: var(--text-muted);
 }
+
+/* ============================================================
+   QUICK GUIDE — first-run explainer
+   Five cards on the actual loop of a round. Skippable at every
+   step; shown once and reopenable from the lobby afterwards.
+   ============================================================ */
+.guide-backdrop {
+  position: fixed;
+  inset: 0;
+  z-index: 120;
+  display: grid;
+  place-items: center;
+  padding: 20px;
+  background: rgba(4, 2, 8, 0.82);
+  backdrop-filter: blur(6px);
+  animation: guideFade 240ms var(--ease) both;
+}
+
+.guide-card {
+  --guide-tone: var(--amber-glow);
+  position: relative;
+  width: min(460px, 100%);
+  padding: 30px 28px 22px;
+  border-radius: 18px;
+  text-align: center;
+  background: var(--bg-panel-strong);
+  border: 1px solid var(--border);
+  box-shadow: var(--shadow-heavy), 0 0 60px -20px var(--guide-tone);
+  animation: guideCardIn 320ms var(--ease-spring) both;
+}
+
+.guide-card.tone-violet  { --guide-tone: var(--violet); }
+.guide-card.tone-moon    { --guide-tone: var(--moon); }
+.guide-card.tone-amber   { --guide-tone: var(--amber-glow); }
+.guide-card.tone-crimson { --guide-tone: var(--crimson-glow); }
+.guide-card.tone-gold    { --guide-tone: var(--amber-soft); }
+
+.guide-skip {
+  position: absolute;
+  top: 12px;
+  right: 14px;
+  padding: 6px 12px;
+  min-height: 32px;
+  border: none;
+  border-radius: 8px;
+  background: transparent;
+  color: var(--text-muted);
+  font-size: 0.78rem;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  cursor: pointer;
+  transition: color 180ms var(--ease);
+}
+.guide-skip:hover { color: var(--text-main); }
+
+.guide-icon {
+  display: grid;
+  place-items: center;
+  width: 58px;
+  height: 58px;
+  margin: 0 auto 14px;
+  border-radius: 50%;
+  color: var(--guide-tone);
+  background: color-mix(in srgb, var(--guide-tone) 12%, transparent);
+  border: 1px solid color-mix(in srgb, var(--guide-tone) 34%, transparent);
+}
+
+.guide-kicker {
+  display: block;
+  font-size: 0.66rem;
+  font-weight: 600;
+  letter-spacing: 0.3em;
+  text-transform: uppercase;
+  color: var(--guide-tone);
+  margin-bottom: 6px;
+}
+
+.guide-title {
+  font-family: var(--font-display);
+  font-size: 1.5rem;
+  color: var(--text-main);
+  margin-bottom: 10px;
+}
+
+.guide-body {
+  font-family: var(--font-story);
+  font-size: 1.04rem;
+  line-height: 1.55;
+  color: var(--text-soft);
+  margin-bottom: 20px;
+}
+
+.guide-dots {
+  display: flex;
+  justify-content: center;
+  gap: 7px;
+  margin-bottom: 18px;
+}
+
+.guide-dot {
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: rgba(255, 255, 255, 0.16);
+  transition: background 240ms var(--ease), width 240ms var(--ease);
+}
+.guide-dot.is-current {
+  width: 20px;
+  border-radius: 999px;
+  background: var(--guide-tone);
+}
+
+.guide-actions {
+  display: flex;
+  gap: 10px;
+  justify-content: center;
+}
+.guide-actions button {
+  min-width: 116px;
+  min-height: 42px;
+}
+.guide-actions button:disabled {
+  opacity: 0.4;
+  cursor: not-allowed;
+}
+
+@keyframes guideFade { from { opacity: 0; } to { opacity: 1; } }
+@keyframes guideCardIn {
+  from { opacity: 0; transform: translateY(18px) scale(0.96); }
+  to   { opacity: 1; transform: translateY(0) scale(1); }
+}
+
+@media (max-width: 480px) {
+  .guide-card { padding: 26px 20px 18px; }
+  .guide-title { font-size: 1.3rem; }
+  .guide-body { font-size: 0.98rem; }
+  .guide-actions button { min-width: 0; flex: 1; }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .guide-backdrop, .guide-card { animation: none; }
+}
+
+/* ── Touch targets ───────────────────────────────────────────
+   Anything a finger has to hit needs about 44px. The seat action
+   buttons were rendering at 20-24px, and a mis-tap there kills a
+   player, so they get a transparent hit area around the glyph.
+   ============================================================ */
+.seat-kick-btn,
+.seat-execute-btn {
+  position: relative;
+}
+.seat-kick-btn::after,
+.seat-execute-btn::after {
+  content: '';
+  position: absolute;
+  top: 50%;
+  left: 50%;
+  width: 44px;
+  height: 44px;
+  transform: translate(-50%, -50%);
+}
+
+.game-header button,
+.header-icon-btn {
+  min-width: 40px;
+  min-height: 42px;
+}

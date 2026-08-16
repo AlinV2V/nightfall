@@ -6,6 +6,7 @@ import {
   Beer,
   BookOpen,
   Bot,
+  Bug,
   Terminal,
   Trash2,
   X,
@@ -21,6 +22,7 @@ import {
   Gem,
   Globe,
   Hammer,
+  Hexagon,
   Hand,
   HandCoins,
   Lock,
@@ -49,7 +51,9 @@ import {
   Volume2,
   VolumeX,
   Vote,
+  Zap,
   WandSparkles,
+  Waves,
   Wheat,
 } from 'lucide-react';
 
@@ -4072,17 +4076,16 @@ function App() {
         }}
       >
         <Settings size={16} style={{ verticalAlign: 'middle', marginRight: 6 }} />
-        Game Settings
+        Game settings
       </h3>
       <div style={{ display: 'flex', flexDirection: 'column', gap: '10px' }}>
         <label
-          style={{
-            display: 'flex',
-            justifyContent: 'space-between',
-            alignItems: 'center',
-          }}
+          className="settings-toggle"
         >
-          <span>Enable Villager Chat (for non-voice players)</span>
+          <span>
+            <strong>Town chat</strong>
+            <small>A text channel for players who are not on voice.</small>
+          </span>
           <input
             type="checkbox"
             checked={!!gameState.settings.enableVillagerChat}
@@ -4090,48 +4093,28 @@ function App() {
             style={{ width: 18, height: 18 }}
           />
         </label>
-        <label
-          style={{
-            display: 'flex',
-            justifyContent: 'space-between',
-            alignItems: 'center',
-          }}
-        >
-          <span>Discussion (sec)</span>
+        <label className="settings-row">
+          <span>
+            <strong>Discussion</strong>
+            <small>Seconds the village has to talk each day.</small>
+          </span>
           <input
             type="number"
             value={gameState.settings.discussionLength}
             onChange={(e) => updateSettings('discussionLength', parseInt(e.target.value))}
-            style={{
-              width: 70,
-              padding: '6px 10px',
-              background: 'rgba(0,0,0,0.5)',
-              border: '1px solid var(--border)',
-              borderRadius: 6,
-              color: 'var(--text-main)',
-            }}
+            className="settings-number"
           />
         </label>
-        <label
-          style={{
-            display: 'flex',
-            justifyContent: 'space-between',
-            alignItems: 'center',
-          }}
-        >
-          <span>Night Action (sec)</span>
+        <label className="settings-row">
+          <span>
+            <strong>Night action</strong>
+            <small>Seconds each waking role gets to act.</small>
+          </span>
           <input
             type="number"
             value={gameState.settings.nightActionTime}
             onChange={(e) => updateSettings('nightActionTime', parseInt(e.target.value))}
-            style={{
-              width: 70,
-              padding: '6px 10px',
-              background: 'rgba(0,0,0,0.5)',
-              border: '1px solid var(--border)',
-              borderRadius: 6,
-              color: 'var(--text-main)',
-            }}
+            className="settings-number"
           />
         </label>
         <label className="settings-toggle">
@@ -4152,12 +4135,12 @@ function App() {
           </div>
           <div className="exec-scenes-grid">
             {[
-              { id: 'tentacles', label: 'Cthulhu', emoji: '🐙' },
-              { id: 'cthulhu_abyss', label: 'Chutulu v2', emoji: '🦑' },
-              { id: 'thunder', label: 'Thunder', emoji: '⚡' },
-              { id: 'void', label: 'Void', emoji: '🌀' },
-              { id: 'bees', label: 'Bees', emoji: '🐝' },
-              { id: 'bees_v2', label: 'Bees v2 (Hive)', emoji: '🍯' },
+              { id: 'tentacles', label: 'Tentacles', Icon: Waves },
+              { id: 'cthulhu_abyss', label: 'The Abyss', Icon: Eye },
+              { id: 'thunder', label: 'Thunder', Icon: Zap },
+              { id: 'void', label: 'The Void', Icon: CircleDot },
+              { id: 'bees', label: 'Swarm', Icon: Bug },
+              { id: 'bees_v2', label: 'The Hive', Icon: Hexagon },
             ].map((scene) => {
               const enabledList = Array.isArray(gameState.settings.executionScenes)
                 ? gameState.settings.executionScenes
@@ -4177,7 +4160,7 @@ function App() {
                   className={`exec-scene-chip ${isOn ? 'on' : 'off'}`}
                   onClick={toggle}
                 >
-                  <span className="exec-scene-emoji">{scene.emoji}</span>
+                  <span className="exec-scene-icon"><scene.Icon size={15} /></span>
                   <span className="exec-scene-label">{scene.label}</span>
                 </button>
               );
@@ -4188,7 +4171,7 @@ function App() {
           <div className="bot-controls-head">
             <strong>
               <Bot size={14} style={{ verticalAlign: 'middle', marginRight: 6 }} />
-              Test Bots
+              Test bots
             </strong>
             <small>Auto-playing bots for solo testing. Host-only.</small>
           </div>

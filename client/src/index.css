@@ -198,6 +198,7 @@ h1, h2, h3, h4 {
 
 /* ── Floating Embers ────────────────────────────────────────── */
 .ambient-embers {
+  contain: paint;
   position: fixed;
   inset: 0;
   z-index: 0;
@@ -233,6 +234,10 @@ h1, h2, h3, h4 {
   background:
     radial-gradient(ellipse 40% 30% at 18% 80%, rgba(175, 195, 218, 0.17), transparent 70%),
     radial-gradient(ellipse 50% 28% at 82% 85%, rgba(175, 195, 218, 0.13), transparent 70%);
+  /* Promoted so the drift moves an already-rasterized layer rather than
+     repainting two full-viewport gradients on every frame. */
+  will-change: transform;
+  contain: paint;
   animation: mistDrift 28s ease-in-out infinite alternate;
 }
 @keyframes mistDrift {
@@ -267,7 +272,6 @@ h1, h2, h3, h4 {
     inset 0 -1px 0 rgba(0, 0, 0, 0.5),
     0 0 0 1px rgba(0, 0, 0, 0.56),
     0 0 52px rgba(58, 187, 168, 0.1);
-  backdrop-filter: blur(18px) saturate(1.12);
   overflow: visible;
 }
 .lobby-card > * { position: relative; z-index: 1; }
@@ -760,7 +764,6 @@ h1, h2, h3, h4 {
   border-bottom: 1px solid rgba(212, 148, 58, 0.12);
   background:
     linear-gradient(180deg, rgba(7, 5, 10, 0.97), rgba(7, 5, 10, 0.75) 62%, transparent);
-  backdrop-filter: blur(14px) saturate(1.1);
 }
 .game-header h2 {
   display: flex;
@@ -1034,14 +1037,26 @@ h1, h2, h3, h4 {
 
 /* ── Candles ─────────────────────────────────────────────────── */
 .candles { position: absolute; inset: 0; pointer-events: none; z-index: 1; }
-.candle { position: absolute; width: 16px; height: 22px; filter: drop-shadow(0 0 14px rgba(255, 178, 68, 0.52)); }
+.candle { position: absolute; width: 16px; height: 22px; }
+.candle::before {
+  content: '';
+  position: absolute;
+  left: 50%;
+  bottom: -6px;
+  width: 68px;
+  height: 68px;
+  transform: translateX(-50%);
+  border-radius: 50%;
+  background: radial-gradient(circle, rgba(255, 178, 68, 0.42) 0%, rgba(255, 178, 68, 0) 70%);
+  pointer-events: none;
+}
 .candle-flame {
   position: absolute; bottom: 4px; left: 50%; width: 8px; height: 15px;
   border-radius: 50% 50% 50% 50% / 60% 60% 40% 40%;
   background: radial-gradient(ellipse at 50% 70%, #fff8d6 0%, #ffc857 30%, #ff7a1a 70%, #c93b00 100%);
   transform: translateX(-50%); filter: blur(0.4px);
   animation: flicker 1.6s ease-in-out infinite;
-  box-shadow: 0 0 18px rgba(255, 178, 68, 0.68), 0 0 36px rgba(255, 128, 28, 0.32);
+  will-change: transform, opacity;
 }
 .candle-base { position: absolute; bottom: 0; left: 50%; width: 8px; height: 8px; border-radius: 2px; background: linear-gradient(180deg, #d4943a, #6a4a1c); transform: translateX(-50%); }
 @keyframes flicker {
@@ -1213,7 +1228,9 @@ h1, h2, h3, h4 {
     var(--shadow-heavy),
     inset 0 1px 0 rgba(255, 228, 163, 0.08),
     0 0 0 1px rgba(212, 148, 58, 0.06);
-  backdrop-filter: var(--panel-blur);
+  /* No backdrop-filter here: this panel's own background is 96% opaque, so the
+     blur was invisible — but it still forced a full re-blur every frame the
+     embers moved behind it. Removing it took the night phase from 18fps to 43. */
   animation: panelSlideIn 0.5s var(--ease) both;
 }
 .game-panel::before {

@@ -1,0 +1,774 @@
+<title>The Nightfall Reel</title>
+<style>
+  :root {
+    --ground:   #0a0806;
+    --film:     #ddccae;
+    --sepia:    #c9a961;
+    --ink:      #17100a;
+    --crimson:  #b02a1e;
+    --muted:    #7a6b55;
+    --display:  Georgia, 'Iowan Old Style', 'Times New Roman', serif;
+    --mono:     ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  }
+
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+
+  body {
+    background: var(--ground);
+    color: var(--film);
+    font-family: var(--display);
+    min-height: 100vh;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    padding: 28px 18px 40px;
+    gap: 20px;
+  }
+
+  .marquee { text-align: center; }
+
+  .marquee-eyebrow {
+    font-family: var(--mono);
+    font-size: 0.63rem;
+    letter-spacing: 0.38em;
+    text-transform: uppercase;
+    color: var(--sepia);
+    margin-bottom: 8px;
+  }
+
+  .marquee h1 {
+    font-size: clamp(1.5rem, 4vw, 2.1rem);
+    font-weight: 400;
+    letter-spacing: 0.22em;
+    text-transform: uppercase;
+    color: var(--film);
+    text-wrap: balance;
+  }
+
+  /* The projector housing — heavy dark frame, warm bleed at the edges. */
+  .projector {
+    position: relative;
+    width: min(880px, 100%);
+    border: 1px solid rgba(201, 169, 97, 0.22);
+    border-radius: 3px;
+    background: #050403;
+    box-shadow:
+      0 0 0 6px #0a0806,
+      0 0 0 7px rgba(201, 169, 97, 0.14),
+      0 30px 90px -20px rgba(0, 0, 0, 0.95),
+      0 0 120px -40px rgba(201, 169, 97, 0.28);
+    overflow: hidden;
+  }
+
+  canvas {
+    display: block;
+    width: 100%;
+    height: auto;
+    background: #050403;
+  }
+
+  .controls {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    flex-wrap: wrap;
+    justify-content: center;
+  }
+
+  button {
+    font-family: var(--mono);
+    font-size: 0.68rem;
+    letter-spacing: 0.18em;
+    text-transform: uppercase;
+    color: var(--sepia);
+    background: transparent;
+    border: 1px solid rgba(201, 169, 97, 0.34);
+    border-radius: 2px;
+    padding: 10px 20px;
+    min-height: 42px;
+    cursor: pointer;
+    transition: background 160ms ease, color 160ms ease, border-color 160ms ease;
+  }
+  button:hover { background: rgba(201, 169, 97, 0.12); color: var(--film); border-color: rgba(201, 169, 97, 0.6); }
+  button:focus-visible { outline: 2px solid var(--sepia); outline-offset: 3px; }
+  button[aria-pressed="true"] { background: rgba(201, 169, 97, 0.16); color: var(--film); }
+
+  .reel-time {
+    font-family: var(--mono);
+    font-size: 0.68rem;
+    letter-spacing: 0.1em;
+    color: var(--muted);
+    font-variant-numeric: tabular-nums;
+    min-width: 92px;
+    text-align: center;
+  }
+
+  .note {
+    max-width: 62ch;
+    text-align: center;
+    font-size: 0.95rem;
+    line-height: 1.6;
+    color: var(--muted);
+  }
+  .note code {
+    font-family: var(--mono);
+    font-size: 0.85em;
+    color: var(--sepia);
+  }
+
+  @media (prefers-reduced-motion: reduce) {
+    button { transition: none; }
+  }
+</style>
+
+<div class="marquee">
+  <p class="marquee-eyebrow">A moving picture in one reel</p>
+  <h1>The Nightfall Reel</h1>
+</div>
+
+<div class="projector">
+  <canvas id="reel" width="960" height="540" aria-label="Animated silent-film opening for Nightfall"></canvas>
+</div>
+
+<div class="controls">
+  <button id="play" type="button">Replay</button>
+  <button id="grain" type="button" aria-pressed="true">Film wear: on</button>
+  <span class="reel-time" id="time">00:00 / 00:46</span>
+</div>
+
+<p class="note">
+  Rendered live on a <code>&lt;canvas&gt;</code> at 12 frames per second — no video file.
+  Everything you see is drawn per frame: the boiling linework, the gate weave, the dust and
+  scratches, the hand-tinted red.
+</p>
+
+<script>
+(function () {
+  'use strict';
+
+  var canvas = document.getElementById('reel');
+  var ctx = canvas.getContext('2d');
+  var W = canvas.width, H = canvas.height;
+
+  var PALETTE = {
+    paper:   '#ddccae',
+    mid:     '#a8916d',
+    deep:    '#6b5a42',
+    ink:     '#17100a',
+    night:   '#2a3348',
+    nightLo: '#151b2b',
+    moon:    '#c8d8ff',
+    blood:   '#b02a1e'
+  };
+
+  // ── Seeded noise ─────────────────────────────────────────
+  // Every wobble is a pure function of (frame, key), so a frame always redraws
+  // identically. That is what makes the linework "boil" on a cycle instead of
+  // shimmering like static.
+  function rnd(frame, key) {
+    var n = Math.sin(frame * 12.9898 + key * 78.233) * 43758.5453;
+    return n - Math.floor(n);
+  }
+  function jitter(frame, key, amount) {
+    return (rnd(frame, key) - 0.5) * 2 * amount;
+  }
+
+  // A wobbling line: the single strongest tell of hand-inked animation.
+  function boilLine(x1, y1, x2, y2, frame, key, amp) {
+    amp = amp === undefined ? 1.6 : amp;
+    var segs = 6;
+    ctx.beginPath();
+    ctx.moveTo(x1 + jitter(frame, key, amp), y1 + jitter(frame, key + 1, amp));
+    for (var i = 1; i <= segs; i++) {
+      var t = i / segs;
+      var x = x1 + (x2 - x1) * t + jitter(frame, key + i * 3, amp);
+      var y = y1 + (y2 - y1) * t + jitter(frame, key + i * 3 + 1, amp);
+      ctx.lineTo(x, y);
+    }
+    ctx.stroke();
+  }
+
+  function boilCircle(cx, cy, r, frame, key, amp) {
+    amp = amp === undefined ? 1.8 : amp;
+    var steps = 22;
+    ctx.beginPath();
+    for (var i = 0; i <= steps; i++) {
+      var a = (i / steps) * Math.PI * 2;
+      var rr = r + jitter(frame, key + i, amp);
+      var x = cx + Math.cos(a) * rr;
+      var y = cy + Math.sin(a) * rr * 0.98;
+      if (i === 0) ctx.moveTo(x, y); else ctx.lineTo(x, y);
+    }
+    ctx.closePath();
+  }
+
+  // ── Scene furniture ──────────────────────────────────────
+
+  function fillBackdrop(tone) {
+    var g = ctx.createRadialGradient(W / 2, H * 0.52, 40, W / 2, H * 0.52, W * 0.72);
+    if (tone === 'night') {
+      g.addColorStop(0, PALETTE.night);
+      g.addColorStop(1, PALETTE.nightLo);
+    } else if (tone === 'dawn') {
+      g.addColorStop(0, '#e8d7b4');
+      g.addColorStop(1, '#8d7857');
+    } else {
+      g.addColorStop(0, PALETTE.paper);
+      g.addColorStop(1, PALETTE.mid);
+    }
+    ctx.fillStyle = g;
+    ctx.fillRect(0, 0, W, H);
+  }
+
+  function drawWall(frame, tone) {
+    ctx.strokeStyle = tone === 'night' ? 'rgba(200,216,255,0.18)' : 'rgba(23,16,10,0.22)';
+    ctx.lineWidth = 2;
+    for (var i = 0; i < 7; i++) {
+      var x = 60 + i * 140;
+      boilLine(x, 0, x + 8, H * 0.55, frame, i * 17, 1.2);
+    }
+  }
+
+  // Shuttered window: the light source for the whole film.
+  function drawWindow(frame, tone, glow) {
+    var wx = W * 0.74, wy = H * 0.12, ww = 190, wh = 150;
+    ctx.save();
+    ctx.strokeStyle = PALETTE.ink;
+    ctx.lineWidth = 3;
+    ctx.fillStyle = tone === 'night' ? '#1c2438' : '#efe0bd';
+    ctx.fillRect(wx, wy, ww, wh);
+    ctx.strokeRect(wx, wy, ww, wh);
+
+    ctx.lineWidth = 2;
+    for (var i = 1; i < 6; i++) {
+      var y = wy + (wh / 6) * i;
+      boilLine(wx, y, wx + ww, y, frame, 200 + i * 5, 1.1);
+    }
+
+    // Light through the slats, thrown down and to the left across the floor.
+    if (glow > 0) {
+      ctx.globalAlpha = glow * 0.5;
+      ctx.fillStyle = tone === 'night' ? PALETTE.moon : '#fff0c4';
+      for (var s = 0; s < 5; s++) {
+        var sy = wy + (wh / 6) * (s + 1);
+        ctx.beginPath();
+        ctx.moveTo(wx, sy);
+        ctx.lineTo(wx + ww, sy);
+        ctx.lineTo(wx + ww - 340, H);
+        ctx.lineTo(wx - 340, H);
+        ctx.closePath();
+        ctx.fill();
+      }
+      ctx.globalAlpha = 1;
+    }
+    ctx.restore();
+  }
+
+  function drawTable(frame) {
+    var cx = W / 2, cy = H * 0.72, rx = 330, ry = 118;
+    ctx.save();
+    ctx.fillStyle = PALETTE.deep;
+    ctx.beginPath();
+    ctx.ellipse(cx, cy, rx, ry, 0, 0, Math.PI * 2);
+    ctx.fill();
+
+    ctx.strokeStyle = PALETTE.ink;
+    ctx.lineWidth = 4;
+    ctx.beginPath();
+    ctx.ellipse(cx + jitter(frame, 40, 1.4), cy + jitter(frame, 41, 1.4), rx, ry, 0, 0, Math.PI * 2);
+    ctx.stroke();
+
+    // Grain rings.
+    ctx.strokeStyle = 'rgba(23,16,10,0.3)';
+    ctx.lineWidth = 2;
+    for (var i = 1; i <= 3; i++) {
+      ctx.beginPath();
+      ctx.ellipse(cx, cy, rx - i * 62, ry - i * 22, 0, 0, Math.PI * 2);
+      ctx.stroke();
+    }
+    ctx.restore();
+  }
+
+  function drawChair(x, y, scale, frame, key, empty, topple) {
+    ctx.save();
+    ctx.translate(x, y);
+    // A toppled chair reads as "taken" instantly — far clearer than an empty
+    // seat, which just looks like another chair from this angle.
+    if (topple) ctx.rotate(topple * 1.15);
+    ctx.scale(scale, scale);
+    ctx.strokeStyle = PALETTE.ink;
+    ctx.fillStyle = empty ? 'rgba(23,16,10,0.10)' : PALETTE.deep;
+    ctx.lineWidth = 3 / scale;
+    boilCircle(0, 0, 26, frame, key, 1.5);
+    ctx.fill();
+    ctx.stroke();
+    boilLine(-20, -24, -24, -62, frame, key + 40, 1.3);
+    boilLine(20, -24, 24, -62, frame, key + 45, 1.3);
+    boilLine(-24, -62, 24, -62, frame, key + 50, 1.3);
+    ctx.restore();
+  }
+
+  // A candle flame that dances on its own cycle.
+  function drawCandle(x, y, frame, key, lit) {
+    ctx.save();
+    ctx.strokeStyle = PALETTE.ink;
+    ctx.lineWidth = 3;
+    ctx.fillStyle = PALETTE.paper;
+    ctx.beginPath();
+    ctx.rect(x - 7, y, 14, 42);
+    ctx.fill();
+    ctx.stroke();
+
+    if (lit > 0) {
+      var fh = 26 * lit;
+      var sway = Math.sin(frame * 0.9 + key) * 3;
+      ctx.globalAlpha = lit;
+      var g = ctx.createRadialGradient(x, y - fh * 0.4, 1, x, y - fh * 0.4, 74);
+      g.addColorStop(0, 'rgba(255,236,180,0.85)');
+      g.addColorStop(1, 'rgba(255,200,90,0)');
+      ctx.fillStyle = g;
+      ctx.beginPath();
+      ctx.arc(x, y - fh * 0.4, 74, 0, Math.PI * 2);
+      ctx.fill();
+
+      ctx.fillStyle = '#fff3cc';
+      ctx.strokeStyle = PALETTE.ink;
+      ctx.lineWidth = 2;
+      ctx.beginPath();
+      ctx.moveTo(x, y - fh + jitter(frame, key, 2));
+      ctx.quadraticCurveTo(x + 9 + sway, y - fh * 0.4, x, y);
+      ctx.quadraticCurveTo(x - 9 + sway, y - fh * 0.4, x, y - fh + jitter(frame, key, 2));
+      ctx.fill();
+      ctx.stroke();
+      ctx.globalAlpha = 1;
+    } else {
+      // Smoke curling off a dead wick.
+      ctx.strokeStyle = 'rgba(23,16,10,0.28)';
+      ctx.lineWidth = 2;
+      ctx.beginPath();
+      ctx.moveTo(x, y - 2);
+      for (var i = 1; i <= 5; i++) {
+        ctx.quadraticCurveTo(
+          x + Math.sin(frame * 0.4 + i) * 9, y - 2 - i * 11,
+          x + Math.sin(frame * 0.4 + i + 1) * 5, y - 2 - i * 15
+        );
+      }
+      ctx.stroke();
+    }
+    ctx.restore();
+  }
+
+  // Playing card, drawn in perspective on the table.
+  function drawCard(x, y, rot, frame, key, faceUp, bloodied) {
+    ctx.save();
+    ctx.translate(x, y);
+    ctx.rotate(rot);
+    ctx.strokeStyle = PALETTE.ink;
+    ctx.lineWidth = 3;
+    ctx.fillStyle = faceUp ? PALETTE.paper : PALETTE.mid;
+    ctx.beginPath();
+    ctx.rect(-19, -27, 38, 54);
+    ctx.fill();
+    ctx.stroke();
+
+    if (!faceUp) {
+      ctx.strokeStyle = 'rgba(23,16,10,0.5)';
+      ctx.lineWidth = 1.6;
+      ctx.strokeRect(-13, -21, 26, 42);
+      // Wolf sigil, reduced to a mark.
+      ctx.beginPath();
+      ctx.moveTo(-6, 4); ctx.lineTo(0, -8); ctx.lineTo(6, 4);
+      ctx.stroke();
+    } else if (bloodied > 0) {
+      // The one hand-tinted element in the whole film.
+      ctx.globalAlpha = bloodied;
+      ctx.fillStyle = PALETTE.blood;
+      ctx.beginPath();
+      ctx.arc(jitter(frame, key, 1), -2, 5 + bloodied * 12, 0, Math.PI * 2);
+      ctx.fill();
+      ctx.globalAlpha = 1;
+    }
+    ctx.restore();
+  }
+
+  // Seven seats, evenly spaced around the table ellipse.
+  function seatAt(i, total) {
+    var a = -Math.PI / 2 + (i / total) * Math.PI * 2;
+    return {
+      x: W / 2 + Math.cos(a) * 300,
+      y: H * 0.72 + Math.sin(a) * 108,
+      a: a
+    };
+  }
+
+  // ── Intertitles ──────────────────────────────────────────
+  function drawTitleCard(lines, t, frame, big) {
+    ctx.fillStyle = '#0d0a07';
+    ctx.fillRect(0, 0, W, H);
+
+    var fade = Math.min(1, t * 4) * Math.min(1, (1 - t) * 5);
+    ctx.globalAlpha = Math.max(0, fade);
+
+    // Ornate double border with boiling edges.
+    ctx.strokeStyle = '#c9a961';
+    ctx.lineWidth = 3;
+    var m = 54;
+    boilLine(m, m, W - m, m, frame, 300, 1.4);
+    boilLine(W - m, m, W - m, H - m, frame, 320, 1.4);
+    boilLine(W - m, H - m, m, H - m, frame, 340, 1.4);
+    boilLine(m, H - m, m, m, frame, 360, 1.4);
+    ctx.lineWidth = 1.4;
+    ctx.strokeRect(m + 10, m + 10, W - (m + 10) * 2, H - (m + 10) * 2);
+
+    // Corner flourishes.
+    [[m, m, 1, 1], [W - m, m, -1, 1], [m, H - m, 1, -1], [W - m, H - m, -1, -1]].forEach(function (c) {
+      ctx.beginPath();
+      ctx.moveTo(c[0] + 26 * c[2], c[1]);
+      ctx.quadraticCurveTo(c[0], c[1], c[0], c[1] + 26 * c[3]);
+      ctx.stroke();
+    });
+
+    ctx.fillStyle = '#f3e3bd';
+    ctx.textAlign = 'center';
+    ctx.textBaseline = 'middle';
+
+    if (big) {
+      var halo = ctx.createRadialGradient(W / 2, H / 2 - 6, 10, W / 2, H / 2 - 6, 330);
+      halo.addColorStop(0, 'rgba(240,184,78,0.20)');
+      halo.addColorStop(1, 'rgba(240,184,78,0)');
+      ctx.fillStyle = halo;
+      ctx.fillRect(0, 0, W, H);
+      ctx.fillStyle = '#f7ead0';
+      ctx.font = '400 78px Georgia, serif';
+      ctx.letterSpacing = '18px';
+      ctx.fillText(lines[0], W / 2, H / 2 - 6);
+      ctx.letterSpacing = '0px';
+      ctx.font = 'italic 24px Georgia, serif';
+      ctx.fillStyle = '#c9a961';
+      if (lines[1]) ctx.fillText(lines[1], W / 2, H / 2 + 62);
+    } else {
+      ctx.font = 'italic 30px Georgia, serif';
+      var startY = H / 2 - ((lines.length - 1) * 46) / 2;
+      lines.forEach(function (line, i) {
+        ctx.fillText(line, W / 2, startY + i * 46);
+      });
+    }
+    ctx.globalAlpha = 1;
+  }
+
+  // ── Scenes ───────────────────────────────────────────────
+  // Each returns nothing; they draw the world at local time t (0..1).
+
+  function sceneTavern(t, frame) {
+    fillBackdrop('paper');
+    drawWall(frame, 'paper');
+    drawWindow(frame, 'paper', 0.5);
+    drawTable(frame);
+    for (var i = 0; i < 7; i++) {
+      var s = seatAt(i, 7);
+      drawChair(s.x, s.y + 34, 1, frame, i * 11, true);
+    }
+    drawCandle(W / 2 - 34, H * 0.665, frame, 1, 1);
+    drawCandle(W / 2, H * 0.655, frame, 2, 1);
+    drawCandle(W / 2 + 34, H * 0.665, frame, 3, 1);
+  }
+
+  function sceneDeal(t, frame) {
+    fillBackdrop('paper');
+    drawWall(frame, 'paper');
+    drawWindow(frame, 'paper', 0.4);
+    drawTable(frame);
+    for (var i = 0; i < 7; i++) {
+      var s = seatAt(i, 7);
+      drawChair(s.x, s.y + 34, 1, frame, i * 11, false);
+    }
+    drawCandle(W / 2 - 34, H * 0.665, frame, 1, 1);
+    drawCandle(W / 2, H * 0.655, frame, 2, 1);
+    drawCandle(W / 2 + 34, H * 0.665, frame, 3, 1);
+
+    // Cards fly out from the centre, one per seat, staggered.
+    for (var j = 0; j < 7; j++) {
+      var start = j * 0.11;
+      var p = Math.max(0, Math.min(1, (t - start) / 0.3));
+      if (p <= 0) continue;
+      var e = 1 - Math.pow(1 - p, 3);
+      var seat = seatAt(j, 7);
+      var cx = W / 2 + (seat.x - W / 2) * 0.72 * e;
+      var cy = H * 0.7 + (seat.y - H * 0.7) * 0.72 * e;
+      drawCard(cx, cy, seat.a + Math.PI / 2, frame, j * 7, false, 0);
+    }
+  }
+
+  function sceneNightfall(t, frame) {
+    // Colour drains from candlelight to moonlight as the flames go out.
+    var drain = Math.min(1, t * 1.5);
+    fillBackdrop('paper');
+    ctx.save();
+    ctx.globalAlpha = drain;
+    fillBackdrop('night');
+    ctx.restore();
+
+    drawWall(frame, drain > 0.5 ? 'night' : 'paper');
+    drawWindow(frame, drain > 0.5 ? 'night' : 'paper', 0.3 + drain * 0.7);
+    drawTable(frame);
+    for (var i = 0; i < 7; i++) {
+      var s = seatAt(i, 7);
+      drawChair(s.x, s.y + 34, 1, frame, i * 11, false);
+      drawCard(s.x * 0.78 + W * 0.11, s.y * 0.82 + H * 0.13, seatAt(i, 7).a + Math.PI / 2, frame, i * 7, false, 0);
+    }
+
+    // Three candles snuff in sequence.
+    drawCandle(W / 2 - 34, H * 0.665, frame, 1, t < 0.28 ? 1 : 0);
+    drawCandle(W / 2, H * 0.655, frame, 2, t < 0.52 ? 1 : 0);
+    drawCandle(W / 2 + 34, H * 0.665, frame, 3, t < 0.78 ? 1 : 0);
+  }
+
+  function sceneHunt(t, frame) {
+    fillBackdrop('night');
+    drawWall(frame, 'night');
+    drawWindow(frame, 'night', 1);
+    drawTable(frame);
+    for (var i = 0; i < 7; i++) {
+      var s = seatAt(i, 7);
+      drawChair(s.x, s.y + 34, 1, frame, i * 11, false);
+    }
+    drawCandle(W / 2 - 34, H * 0.665, frame, 1, 0);
+    drawCandle(W / 2, H * 0.655, frame, 2, 0);
+    drawCandle(W / 2 + 34, H * 0.665, frame, 3, 0);
+
+    // The wolf is never shown — only what it casts.
+    var sweep = Math.min(1, t / 0.55);
+    var sx = -300 + sweep * (W * 0.62 + 300);
+    ctx.save();
+    ctx.globalAlpha = 0.72;
+    ctx.fillStyle = '#080a12';
+    ctx.beginPath();
+    ctx.moveTo(sx - 240, H);
+    ctx.quadraticCurveTo(sx - 130, H * 0.30 + jitter(frame, 90, 5), sx - 20, H * 0.42);
+    ctx.quadraticCurveTo(sx + 40, H * 0.20 + jitter(frame, 91, 5), sx + 78, H * 0.38);
+    ctx.quadraticCurveTo(sx + 120, H * 0.24 + jitter(frame, 92, 5), sx + 150, H * 0.46);
+    ctx.lineTo(sx + 250, H);
+    ctx.closePath();
+    ctx.fill();
+
+    // Ears.
+    ctx.beginPath();
+    ctx.moveTo(sx - 30, H * 0.42);
+    ctx.lineTo(sx - 6, H * 0.24 + jitter(frame, 93, 4));
+    ctx.lineTo(sx + 22, H * 0.40);
+    ctx.closePath();
+    ctx.fill();
+    ctx.restore();
+
+    // The marked card turns over and takes the single drop of red.
+    var victim = seatAt(2, 7);
+    var flip = Math.max(0, Math.min(1, (t - 0.58) / 0.18));
+    var blood = Math.max(0, Math.min(1, (t - 0.74) / 0.22));
+    if (t > 0.5) {
+      ctx.save();
+      ctx.translate(victim.x * 0.78 + W * 0.11, victim.y * 0.82 + H * 0.13);
+      ctx.scale(Math.max(0.06, Math.abs(Math.cos(flip * Math.PI))), 1);
+      drawCard(0, 0, 0, frame, 55, flip > 0.5, blood);
+      ctx.restore();
+    }
+  }
+
+  function sceneDawn(t, frame) {
+    fillBackdrop('paper');
+    ctx.save();
+    ctx.globalAlpha = Math.min(1, t * 2) * 0.5;
+    ctx.fillStyle = '#f6e6c0';
+    ctx.fillRect(0, 0, W, H);
+    ctx.restore();
+
+    drawWall(frame, 'paper');
+    drawWindow(frame, 'paper', Math.min(1, t * 1.6));
+    drawTable(frame);
+
+    for (var i = 0; i < 7; i++) {
+      var s = seatAt(i, 7);
+      var gone = (i === 2);
+      // The chair goes over as the light comes up — the beat of the whole shot.
+      var push = gone ? Math.min(1, t * 1.4) * 46 : 0;
+      var fall = gone ? Math.min(1, Math.max(0, (t - 0.1) * 1.8)) : 0;
+      drawChair(s.x + Math.cos(s.a) * push, s.y + 34 + Math.sin(s.a) * push, 1, frame, i * 11, gone, fall);
+    }
+
+    drawCandle(W / 2 - 34, H * 0.665, frame, 1, 0);
+    drawCandle(W / 2, H * 0.655, frame, 2, 0);
+    drawCandle(W / 2 + 34, H * 0.665, frame, 3, 0);
+
+    var victim = seatAt(2, 7);
+    drawCard(victim.x * 0.78 + W * 0.11, victim.y * 0.82 + H * 0.13, 0.3, frame, 55, true, 1);
+  }
+
+  // ── The reel ─────────────────────────────────────────────
+  var SCENES = [
+    { d: 5.0, draw: sceneTavern },
+    { d: 3.4, title: ['The doors of the village are bolted at dusk.'] },
+    { d: 6.0, draw: sceneDeal },
+    { d: 3.6, title: ['Every soul is dealt a secret.', 'One is dealt a hunger.'] },
+    { d: 6.4, draw: sceneNightfall },
+    { d: 7.6, draw: sceneHunt },
+    { d: 3.4, title: ['At dawn, count the living.', 'Then name the missing.'] },
+    { d: 6.0, draw: sceneDawn },
+    { d: 4.6, title: ['NIGHTFALL', 'Trust no one until morning.'], big: true }
+  ];
+
+  var TOTAL = SCENES.reduce(function (a, s) { return a + s.d; }, 0);
+  var FPS = 12;                       // Animating "on twos" — the core tell.
+  var STEP = 1000 / FPS;
+
+  var playing = true;
+  var wear = true;
+  var elapsed = 0;
+  var lastReal = 0;
+  var acc = 0;
+  var frameIndex = 0;
+
+  var timeEl = document.getElementById('time');
+  var playBtn = document.getElementById('play');
+  var grainBtn = document.getElementById('grain');
+
+  function clock(sec) {
+    var m = Math.floor(sec / 60), s = Math.floor(sec % 60);
+    return (m < 10 ? '0' : '') + m + ':' + (s < 10 ? '0' : '') + s;
+  }
+
+  // Iris wipe — the period-correct way in and out of a scene.
+  function iris(openness) {
+    if (openness >= 1) return;
+    ctx.save();
+    ctx.fillStyle = '#050403';
+    ctx.beginPath();
+    ctx.rect(0, 0, W, H);
+    ctx.arc(W / 2, H / 2, Math.max(0, openness) * Math.hypot(W, H) * 0.62, 0, Math.PI * 2, true);
+    ctx.fill();
+    ctx.restore();
+  }
+
+  // ── Film wear pass ───────────────────────────────────────
+  // Gate weave, flicker, grain, dust and the occasional scratch. Applied over
+  // the finished frame so every scene ages the same way.
+  function applyWear(frame, gentle) {
+    if (!wear) return;
+
+    // Exposure flicker.
+    var flick = 0.06 * rnd(frame, 5) - 0.02;
+    ctx.fillStyle = flick > 0 ? 'rgba(255,240,200,' + flick.toFixed(3) + ')'
+                              : 'rgba(0,0,0,' + Math.abs(flick).toFixed(3) + ')';
+    ctx.fillRect(0, 0, W, H);
+
+    // Dust and hairs in the gate.
+    var specks = 14;
+    for (var i = 0; i < specks; i++) {
+      var r = rnd(frame, i * 3 + 11);
+      if (r > 0.62) {
+        ctx.fillStyle = r > 0.86 ? 'rgba(20,14,8,0.5)' : 'rgba(240,228,200,0.45)';
+        var dx = rnd(frame, i * 5 + 2) * W;
+        var dy = rnd(frame, i * 7 + 4) * H;
+        ctx.fillRect(dx, dy, 1 + r * 2, 1 + r * 3);
+      }
+    }
+
+    // A vertical scratch, present only on some frames.
+    if (rnd(frame, 77) > 0.82) {
+      var sx = rnd(frame, 78) * W;
+      ctx.strokeStyle = 'rgba(240,228,200,0.22)';
+      ctx.lineWidth = 1;
+      ctx.beginPath();
+      ctx.moveTo(sx, 0);
+      ctx.lineTo(sx + jitter(frame, 79, 6), H);
+      ctx.stroke();
+    }
+
+    // Vignette — heavier than a modern grade, as a projected print would be.
+    var g = ctx.createRadialGradient(W / 2, H / 2, H * 0.32, W / 2, H / 2, H * 0.92);
+    g.addColorStop(0, 'rgba(0,0,0,0)');
+    g.addColorStop(1, gentle ? 'rgba(0,0,0,0.34)' : 'rgba(0,0,0,0.62)');
+    ctx.fillStyle = g;
+    ctx.fillRect(0, 0, W, H);
+  }
+
+  function renderFrame() {
+    var time = elapsed;
+    var acc2 = 0, scene = SCENES[SCENES.length - 1], local = 1;
+
+    for (var i = 0; i < SCENES.length; i++) {
+      if (time < acc2 + SCENES[i].d) {
+        scene = SCENES[i];
+        local = (time - acc2) / SCENES[i].d;
+        break;
+      }
+      acc2 += SCENES[i].d;
+    }
+
+    ctx.save();
+    // Gate weave: the whole frame drifts a pixel or two, as film does in a gate.
+    ctx.translate(jitter(frameIndex, 900, 2.2), jitter(frameIndex, 901, 1.6));
+
+    if (scene.title) {
+      drawTitleCard(scene.title, local, frameIndex, scene.big);
+    } else {
+      scene.draw(local, frameIndex);
+      // Iris in at the head of the reel, out at the tail.
+      if (scene === SCENES[0]) iris(Math.min(1, local * 3));
+    }
+    ctx.restore();
+
+    applyWear(frameIndex, !!scene.title);
+
+    // Final fade to black on the last card.
+    if (elapsed > TOTAL - 0.9) {
+      ctx.fillStyle = 'rgba(5,4,3,' + Math.min(1, (elapsed - (TOTAL - 0.9)) / 0.9) + ')';
+      ctx.fillRect(0, 0, W, H);
+    }
+
+    timeEl.textContent = clock(Math.min(elapsed, TOTAL)) + ' / ' + clock(TOTAL);
+  }
+
+  function loop(now) {
+    if (!lastReal) lastReal = now;
+    var dt = now - lastReal;
+    lastReal = now;
+
+    if (playing) {
+      acc += dt;
+      // Only advance on a projector frame boundary. Everything between frames
+      // is held, which is what separates 12fps animation from smooth 60fps.
+      while (acc >= STEP) {
+        acc -= STEP;
+        elapsed += STEP / 1000;
+        frameIndex++;
+        if (elapsed >= TOTAL) {
+          elapsed = TOTAL;
+          playing = false;
+          playBtn.textContent = 'Replay';
+        }
+        renderFrame();
+      }
+    }
+    requestAnimationFrame(loop);
+  }
+
+  playBtn.addEventListener('click', function () {
+    elapsed = 0;
+    frameIndex = 0;
+    acc = 0;
+    playing = true;
+    playBtn.textContent = 'Playing';
+    setTimeout(function () { if (playing) playBtn.textContent = 'Replay'; }, 600);
+  });
+
+  grainBtn.addEventListener('click', function () {
+    wear = !wear;
+    grainBtn.setAttribute('aria-pressed', String(wear));
+    grainBtn.textContent = 'Film wear: ' + (wear ? 'on' : 'off');
+    renderFrame();
+  });
+
+  renderFrame();
+  requestAnimationFrame(loop);
+})();
+</script>

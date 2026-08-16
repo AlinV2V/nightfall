@@ -78,6 +78,7 @@ nightfall/
 │   ├── gameEngine.js    # Game loop, turn queues, and win resolution
 │   ├── index.js         # Socket event router and static file server
 │   └── logic_check.js   # Engine test suite runner
+├── extras/              # Standalone pieces, not wired into the game
 ├── DEPLOYMENT.md        # Single-VPS deployment guide
 ├── LOGIC_AUDIT.md       # Mechanics audit and role reference
 ├── LICENSE              # License file

@@ -231,6 +231,13 @@ const HUNTER_REVENGE_GRACE_MS = 30000;
 const GHOST_CHANCE = 0.1;
 const GHOST_CHAT_PHASES = new Set(['day', 'accusation', 'defense', 'trial']);
 
+// State is rebroadcast to every player on nearly every action, so anything
+// carried in it is paid for again each time. These two rings are kept long in
+// memory and sent short: the Town Crier renders the last eight entries, and the
+// bot console is a host-only debug panel that is usually closed.
+const EVENT_LOG_SENT = 14;
+const BOT_LOG_SENT = 50;
+
 class GameEngine {
   constructor(roomId, roomIo, rawIo) {
     this.roomId = roomId;
@@ -1755,7 +1762,11 @@ class GameEngine {
               isDead: a?.isDead || false,
             };
           }),
-        log: this.botDebugLog.slice(-this.botDebugMax),
+        // The full 200-entry ring stays in memory for the host's scrollback,
+        // but shipping all of it on every broadcast made the host's payload
+        // four times heavier than anyone else's — for a debug panel that is
+        // usually closed.
+        log: this.botDebugLog.slice(-BOT_LOG_SENT),
       }
       : null;
 
@@ -1875,6 +1886,9 @@ class GameEngine {
       // Held back entirely until the game is over — it contains everything that
       // was hidden while it mattered.
       chronicle: isEnd ? this.chronicle : [],
+      // The Town Crier shows the last handful; the rest of the ring is history
+      // nobody reads, resent on every broadcast.
+      eventLog: this.eventLog.slice(-EVENT_LOG_SENT),
       winner: this.winner,
       settings: this.settings,
       wwKillVotes: isWerewolfTurn ? this.wwKillVotes : {},
@@ -1886,7 +1900,6 @@ class GameEngine {
       myAccusationVote,
       myTrialVote,
       trialTally,
-      eventLog: this.eventLog,
       dawnBringerAvailable: dawnBringerAvailable || false,
     };
   }

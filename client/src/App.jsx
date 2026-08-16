@@ -2419,6 +2419,10 @@ const usePhaseCountdown = (phaseEndsAt, fallbackSeconds = 0) => {
 const pad2 = (n) => String(n).padStart(2, '0');
 const formatClock = (seconds) => `${pad2(Math.floor(seconds / 60))}:${pad2(seconds % 60)}`;
 
+/* Isolated for the same reason as PhaseTimer: a clock that re-renders its own
+   handful of characters, not the board behind it. */
+const ClockText = ({ endsAt, fallback }) => formatClock(usePhaseCountdown(endsAt, fallback));
+
 /* ─── Phase timer ───
    The countdown ring drains as the phase burns down and shifts through calm →
    urgent → critical, so time pressure is legible at a glance instead of
@@ -2426,7 +2430,11 @@ const formatClock = (seconds) => `${pad2(Math.floor(seconds / 60))}:${pad2(secon
 const TIMER_RADIUS = 32;
 const TIMER_CIRCUMFERENCE = 2 * Math.PI * TIMER_RADIUS;
 
-const PhaseTimer = ({ seconds, total, label }) => {
+const PhaseTimer = ({ endsAt, fallback, total, label }) => {
+  // The countdown lives here rather than in App. Hoisted, its 4Hz tick
+  // re-rendered the whole board — twelve seats, every panel — four times a
+  // second. Owning it locally keeps each tick to this dial.
+  const seconds = usePhaseCountdown(endsAt, fallback);
   const span = total > 0 ? total : Math.max(seconds, 1);
   const remaining = Math.max(0, Math.min(1, seconds / span));
   const urgency = seconds <= 5 ? 'critical' : seconds <= 15 ? 'urgent' : 'calm';
@@ -2836,8 +2844,6 @@ function App() {
     };
   }, [gameState?.phase]);
 
-  // One countdown for every timed phase, resolved from the server's deadline.
-  const secondsLeft = usePhaseCountdown(gameState?.phaseEndsAt, gameState?.timeLeft);
 
   useEffect(() => {
     mutedRef.current = muted;
@@ -5449,9 +5455,10 @@ function App() {
             kicker={`Night ${gameState.dayCount}`}
             title="The Wolves Stir"
           />
-          {gameState.currentNightAction && secondsLeft > 0 && (
+          {gameState.currentNightAction && gameState.phaseEndsAt && (
             <PhaseTimer
-              seconds={secondsLeft}
+              endsAt={gameState.phaseEndsAt}
+              fallback={gameState.timeLeft}
               total={gameState.phaseDuration}
               label={gameState.nightPendingContinue ? 'Review' : 'Act'}
             />
@@ -5626,7 +5633,8 @@ function App() {
             title="The Town Speaks"
           />
           <PhaseTimer
-            seconds={secondsLeft}
+            endsAt={gameState.phaseEndsAt}
+            fallback={gameState.timeLeft}
             total={gameState.phaseDuration}
             label="Debate"
           />
@@ -5636,7 +5644,7 @@ function App() {
             icon={<Sun size={15} />}
             kicker={`Day ${gameState.dayCount}`}
             title="Discuss and Decide"
-            status={formatClock(secondsLeft)}
+            status={<ClockText endsAt={gameState.phaseEndsAt} fallback={gameState.timeLeft} />}
             actions={(
               <>
                 <button
@@ -5802,7 +5810,8 @@ function App() {
             title="Point a Finger"
           />
           <PhaseTimer
-            seconds={secondsLeft}
+            endsAt={gameState.phaseEndsAt}
+            fallback={gameState.timeLeft}
             total={gameState.phaseDuration}
             label="Accuse"
           />
@@ -5996,7 +6005,8 @@ function App() {
                 title="State Your Innocence"
               />
               <PhaseTimer
-                seconds={secondsLeft}
+                endsAt={gameState.phaseEndsAt}
+                fallback={gameState.timeLeft}
                 total={gameState.phaseDuration}
                 label="Defence"
               />
@@ -6008,7 +6018,7 @@ function App() {
             icon={<Vote size={15} />}
             kicker="Defense"
             title={`${accusedName} is on trial`}
-            status={formatClock(secondsLeft)}
+            status={<ClockText endsAt={gameState.phaseEndsAt} fallback={gameState.timeLeft} />}
             actions={(
               <>
                 <button
@@ -6131,7 +6141,8 @@ function App() {
                 title="Verdict"
               />
               <PhaseTimer
-                seconds={secondsLeft}
+                endsAt={gameState.phaseEndsAt}
+                fallback={gameState.timeLeft}
                 total={gameState.phaseDuration}
                 label="Verdict"
               />

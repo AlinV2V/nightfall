@@ -142,14 +142,14 @@ h1, h2, h3, h4 {
   background:
     linear-gradient(160deg, rgba(5, 3, 8, 0.72) 0%, rgba(10, 6, 4, 0.28) 52%, rgba(5, 3, 8, 0.7) 100%),
     linear-gradient(180deg, rgba(0, 0, 0, 0.12), rgba(3, 2, 6, 0.72)),
-    url('/background.png') center / cover fixed no-repeat;
+    url('/background.webp') center / cover fixed no-repeat;
 }
 
 .table-scene {
   background:
     linear-gradient(180deg, rgba(5, 5, 8, 0.44), rgba(2, 2, 4, 0.94)),
     linear-gradient(90deg, rgba(10, 62, 66, 0.3), rgba(44, 14, 28, 0.2)),
-    url('/bg_forest.png') center / cover fixed no-repeat;
+    url('/bg_forest.webp') center / cover fixed no-repeat;
 }
 
 .lobby-screen::before {
@@ -303,7 +303,7 @@ h1, h2, h3, h4 {
   border-radius: 8px;
   background:
     linear-gradient(160deg, rgba(255, 255, 255, 0.12), transparent 28%),
-    url('/card_back.png') center / cover no-repeat,
+    url('/card_back.webp') center / cover no-repeat,
     linear-gradient(145deg, #2a1810, #0e0807);
   border: 1px solid rgba(212, 148, 58, 0.28);
   box-shadow: 0 16px 32px rgba(0, 0, 0, 0.72), 0 0 20px rgba(58, 187, 168, 0.1);
@@ -850,7 +850,7 @@ h1, h2, h3, h4 {
   background:
     radial-gradient(circle at 50% 38%, rgba(255, 218, 148, 0.18), transparent 36%),
     radial-gradient(circle at 50% 50%, rgba(58, 31, 15, 0) 50%, rgba(0, 0, 0, 0.64) 88%),
-    url('/table_top.png') center / cover no-repeat,
+    url('/table_top.webp') center / cover no-repeat,
     radial-gradient(circle, #3a1f0f 0%, #150a05 75%);
   box-shadow:
     0 0 0 8px rgba(34, 20, 10, 0.97),
@@ -950,7 +950,7 @@ h1, h2, h3, h4 {
   border-radius: 8px;
   background:
     linear-gradient(160deg, rgba(255, 255, 255, 0.12), transparent 28%),
-    url('/card_back.png') center / cover no-repeat,
+    url('/card_back.webp') center / cover no-repeat,
     linear-gradient(145deg, #2a1810, #0e0807);
   border: 1px solid rgba(212, 148, 58, 0.42);
   box-shadow:
@@ -1151,7 +1151,7 @@ h1, h2, h3, h4 {
 .seat-card {
   position: relative; width: clamp(32px, 4.8vmin, 44px); aspect-ratio: 5 / 7;
   border-radius: 5px;
-  background: url('/card_back.png') center / cover no-repeat, #1a0e08;
+  background: url('/card_back.webp') center / cover no-repeat, #1a0e08;
   border: 1px solid rgba(212, 148, 58, 0.42);
   box-shadow: 0 8px 14px rgba(0, 0, 0, 0.72), inset 0 1px 0 rgba(255, 228, 163, 0.18), inset 0 0 14px rgba(0, 0, 0, 0.42);
   margin-top: 2px; transform: rotate(-3deg); transition: transform 0.3s ease; overflow: hidden;
@@ -1342,7 +1342,7 @@ h1, h2, h3, h4 {
   width: 62px; height: 88px; min-width: 0; padding: 0;
   display: flex; align-items: flex-end; justify-content: center;
   font-size: 0.68rem; letter-spacing: 0.06em;
-  background: linear-gradient(180deg, transparent 50%, rgba(0, 0, 0, 0.72)), url('/card_back.png') center / cover no-repeat, #1a0e08;
+  background: linear-gradient(180deg, transparent 50%, rgba(0, 0, 0, 0.72)), url('/card_back.webp') center / cover no-repeat, #1a0e08;
   border: 1px solid rgba(212, 148, 58, 0.42); text-shadow: 0 1px 4px rgba(0, 0, 0, 0.92); padding-bottom: 5px;
 }
 .center-cards .player-card.selected { transform: translateY(-6px); }
@@ -1650,7 +1650,7 @@ h1, h2, h3, h4 {
 .dealer-stack span, .deal-flight-card {
   position: absolute; inset: 0;
   border: 1px solid rgba(212, 148, 58, 0.46); border-radius: 7px;
-  background: linear-gradient(180deg, transparent 46%, rgba(0, 0, 0, 0.74)), url('/card_back.png') center / cover no-repeat, #1a0e08;
+  background: linear-gradient(180deg, transparent 46%, rgba(0, 0, 0, 0.74)), url('/card_back.webp') center / cover no-repeat, #1a0e08;
   box-shadow: 0 14px 30px rgba(0, 0, 0, 0.56), 0 0 14px rgba(212, 148, 58, 0.16);
 }
 .dealer-stack span:nth-child(1) { transform: rotate(-8deg) translate(-5px, 4px); }

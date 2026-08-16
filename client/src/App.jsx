@@ -238,7 +238,7 @@ const RoundTable =({ players, playerId, phase, isMyTurn, accusedId, tableOverlay
                     style={{
                       backgroundImage: visibleRole && getRoleImage(visibleRole)
                         ? `url(${getRoleImage(visibleRole)})`
-                        : `url('/card_back.png')`,
+                        : `url('/card_back.webp')`,
                     }}
                   >
                     {jailedPlayerId === p.id && (
@@ -1003,54 +1003,54 @@ const PhaseBanner = ({ icon, kicker, title, accent }) => (
 );
 
 const ROLE_IMAGES = {
-  'Alpha Wolf': '/roles/alphawolf.png',
-  'Apprentice Seer': '/roles/apprenticeseer.png',
-  'Aura Seer': '/roles/auraseer.png',
-  Bodyguard: '/roles/bodyguard.png',
-  'Cult Leader': '/roles/cultleader.png',
-  Cupid: '/roles/cupid.png',
-  Cursed: '/roles/cursed.png',
-  Diseased: '/roles/diseased.png',
-  Doppelganger: '/roles/doppelganger.png',
-  'Dream Wolf': '/roles/dreamwolf.png',
-  Drunk: '/roles/drunk.png',
-  Ghost: '/roles/ghost.png',
-  Hunter: '/roles/hunter.png',
-  Jailer: '/roles/jailer.png',
-  'Lone Wolf': '/roles/lonewolf.png',
-  Lycan: '/roles/lycan.png',
-  Mayor: '/roles/mayor.png',
-  Minion: '/roles/minion.png',
-  Moderator: '/roles/moderator.jpg',
-  'Old Hag': '/roles/oldhag.png',
-  Pacifist: '/roles/pacifist.png',
-  Priest: '/roles/priest.png',
-  Prince: '/roles/prince.png',
-  'Private Investigator': '/roles/privateinvestigator.png',
-  Revealer: '/roles/revealer.png',
-  Robber: '/roles/robber.png',
-  Seer: '/roles/seer.png',
-  Sentinel: '/roles/sentinel.png',
-  Sorceress: '/roles/sorceress.png',
-  Spellcaster: '/roles/spellcaster.png',
-  Squire: '/roles/squire.png',
-  Tanner: '/roles/tanner.png',
-  'Tough Guy': '/roles/toughguy.png',
-  Troublemaker: '/roles/troublemaker.png',
-  Vampire: '/roles/vampire.png',
-  Villager: '/roles/villager.png',
-  'Village Idiot': '/roles/villageidiot.png',
-  Werewolf: '/roles/werewolf.png',
-  Witch: '/roles/witch.png',
-  'Wolf Cub': '/roles/wolfcub.png',
-  Wolverine: '/roles/wolverine.png',
+  'Alpha Wolf': '/roles/alphawolf.webp',
+  'Apprentice Seer': '/roles/apprenticeseer.webp',
+  'Aura Seer': '/roles/auraseer.webp',
+  Bodyguard: '/roles/bodyguard.webp',
+  'Cult Leader': '/roles/cultleader.webp',
+  Cupid: '/roles/cupid.webp',
+  Cursed: '/roles/cursed.webp',
+  Diseased: '/roles/diseased.webp',
+  Doppelganger: '/roles/doppelganger.webp',
+  'Dream Wolf': '/roles/dreamwolf.webp',
+  Drunk: '/roles/drunk.webp',
+  Ghost: '/roles/ghost.webp',
+  Hunter: '/roles/hunter.webp',
+  Jailer: '/roles/jailer.webp',
+  'Lone Wolf': '/roles/lonewolf.webp',
+  Lycan: '/roles/lycan.webp',
+  Mayor: '/roles/mayor.webp',
+  Minion: '/roles/minion.webp',
+  Moderator: '/roles/moderator.webp',
+  'Old Hag': '/roles/oldhag.webp',
+  Pacifist: '/roles/pacifist.webp',
+  Priest: '/roles/priest.webp',
+  Prince: '/roles/prince.webp',
+  'Private Investigator': '/roles/privateinvestigator.webp',
+  Revealer: '/roles/revealer.webp',
+  Robber: '/roles/robber.webp',
+  Seer: '/roles/seer.webp',
+  Sentinel: '/roles/sentinel.webp',
+  Sorceress: '/roles/sorceress.webp',
+  Spellcaster: '/roles/spellcaster.webp',
+  Squire: '/roles/squire.webp',
+  Tanner: '/roles/tanner.webp',
+  'Tough Guy': '/roles/toughguy.webp',
+  Troublemaker: '/roles/troublemaker.webp',
+  Vampire: '/roles/vampire.webp',
+  Villager: '/roles/villager.webp',
+  'Village Idiot': '/roles/villageidiot.webp',
+  Werewolf: '/roles/werewolf.webp',
+  Witch: '/roles/witch.webp',
+  'Wolf Cub': '/roles/wolfcub.webp',
+  Wolverine: '/roles/wolverine.webp',
   // New role images
-  'Dawn Bringer': '/roles/dawnbringer.png',
-  Disruptor: '/roles/disruptor.png',
-  'Mad Bomber': '/roles/madboomer.png',
-  'The Reflector': '/roles/reflector.png',
-  Yandere: '/roles/yandere.png',
-  Cthulhu: '/roles/cthulhu.png',
+  'Dawn Bringer': '/roles/dawnbringer.webp',
+  Disruptor: '/roles/disruptor.webp',
+  'Mad Bomber': '/roles/madboomer.webp',
+  'The Reflector': '/roles/reflector.webp',
+  Yandere: '/roles/yandere.webp',
+  Cthulhu: '/roles/cthulhu.webp',
 };
 
 
@@ -1598,7 +1598,7 @@ const RoleCard = ({ role, subtitle, detail }) => {
           className="role-card-graphic has-art"
           style={{ '--role-color': color }}
         >
-          <img className="role-card-art" src={image} alt={`${role} card`} />
+          <img className="role-card-art" src={image} alt={`${role} card`} decoding="async" />
         </div>
         <div className="role-card-note">
           <strong>{role}</strong>
@@ -1982,7 +1982,7 @@ const RuleBookModal = ({ open, onClose, currentRole }) => {
             >
               <div className="list-item-sigil">
                 {image ? (
-                  <img src={image} alt="" />
+                  <img src={image} alt="" loading="lazy" decoding="async" />
                 ) : (
                   <RoleIcon size={20} strokeWidth={1.5} />
                 )}
@@ -2081,7 +2081,7 @@ const RuleBookModal = ({ open, onClose, currentRole }) => {
           <div className="role-card-wrap" style={{ margin: '0 auto 12px' }}>
             <div className={`role-card-graphic ${image ? 'has-art' : ''}`} style={{ '--role-color': color }}>
               {image ? (
-                <img src={image} alt={role} className="role-card-art" />
+                <img src={image} alt={role} className="role-card-art" loading="lazy" decoding="async" />
               ) : (
                 <>
                   <div className="role-card-corner tl">{role[0]}</div>
@@ -2855,29 +2855,34 @@ function App() {
 
   useEffect(() => {
     if (typeof Audio === 'undefined') return;
+    // 'metadata' rather than 'auto' throughout: audio streams from the moment
+    // it is played, so nothing here competes with the board for a slow link.
+    // Preloading all of it eagerly pulled roughly 3 MB before the player had
+    // done anything, most of it for sounds a night away.
     if (!wolfAudioRef.current) {
       wolfAudioRef.current = new Audio('/wolf.mp3');
-      wolfAudioRef.current.preload = 'auto';
+      wolfAudioRef.current.preload = 'metadata';
     }
     if (!morningAudioRef.current) {
       morningAudioRef.current = new Audio('/morning.mp3');
-      morningAudioRef.current.preload = 'auto';
+      morningAudioRef.current.preload = 'metadata';
     }
     if (!lobbyAudioRef.current) {
       lobbyAudioRef.current = new Audio('/Nightfall.mp3');
-      lobbyAudioRef.current.preload = 'auto';
+      lobbyAudioRef.current.preload = 'metadata';
       lobbyAudioRef.current.loop = true;
     }
-    const execTypes = ['tentacles', 'thunder', 'void', 'bees', 'bees_v2', 'cthulhu_abyss'];
-    const execAudioUrl = (t) => {
-      if (t === 'cthulhu_abyss') return '/cthulhu-custom.mp3';
-      if (t === 'bees_v2') return '/exec-bees.mp3'; // share the buzz track with bees v1
-      return `/exec-${t}.mp3`;
-    };
+    // Only the Cthulhu scene actually ships a track. The others were requesting
+    // files that do not exist — the server's SPA catch-all answered each with
+    // index.html, which then failed to decode as audio, four times per load.
+    // The remaining scenes play silent, exactly as they did before.
+    const execTypes = ['cthulhu_abyss'];
+    const execAudioUrl = () => '/cthulhu-custom.mp3';
     execTypes.forEach((t) => {
       if (!executionAudioRef.current[t]) {
         const a = new Audio(execAudioUrl(t));
-        a.preload = 'auto';
+        // 3.3 MB for a scene that may never come up: fetched on play, not on load.
+        a.preload = 'none';
         executionAudioRef.current[t] = a;
       }
     });

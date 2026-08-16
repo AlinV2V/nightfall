@@ -10,9 +10,10 @@ Nightfall is a browser-based social deduction game. Players receive secret roles
 
 - Real-Time Multiplayer: Room management and socket communication using Socket.io.
 - Bot Support: Add AI bots to test game logic or fill player seats.
+- LLM Bots: Point the bots at DeepSeek (or any OpenAI-compatible endpoint) and they reason about who to kill, who to accuse and how to vote, and argue their case in town chat. See "Playing against a model" below.
 - 50+ Roles: Includes standard social deduction roles and custom additions (Cthulhu, Yandere, Disruptor, Reflector, Dawn Bringer).
 - Custom Decks: Deck customization, configurable night kills, and phase timers.
-- Tested Engine: 63 automated tests for role mechanics, turn queues, and win resolution.
+- Tested Engine: 114 automated tests covering role mechanics, turn queues, win resolution, disconnect handling and bot safety.
 
 ## Quick Start
 
@@ -84,6 +85,31 @@ nightfall/
 ├── LICENSE              # License file
 └── package.json         # Project scripts and dependencies
 ```
+
+## Playing against a model
+
+Bots run on heuristics by default. Give them a `DEEPSEEK_API_KEY` and they play
+through a model instead:
+
+```bash
+cp .env.example .env      # then fill in DEEPSEEK_API_KEY
+npm start                 # Node reads .env directly; no extra dependency
+```
+
+A bot is handed exactly the state a human in that seat would receive — the
+output of `getSanitizedState` for its own socket — so it cannot see a card it
+has not earned. The information boundary the game already enforces for players
+is the same one the bots get, which means there is no separate "don't cheat"
+rule to trust.
+
+Everything about it is best-effort. A missing key, a timeout, a malformed
+answer, or a reply naming a player who does not exist all fall through to the
+heuristic bot, and repeated failures trip a breaker so a dead API stops costing
+every decision a timeout. The game never waits on the model to make progress.
+
+Cost is roughly a few hundredths of a cent per bot decision on `-flash`. Table
+talk is the expensive part at one call per living bot per day; set
+`NIGHTFALL_LLM_CHATTER=0` to keep the model for decisions only.
 
 ## Deployment
 

@@ -4,7 +4,7 @@
   "description": "Nightfall - A one-night social deduction browser game",
   "main": "server/index.js",
   "scripts": {
-    "start": "node server/index.js",
+    "start": "node --env-file-if-exists=.env server/index.js",
     "dev": "node server/index.js",
     "build": "npm --prefix client run build",
     "client:install": "npm --prefix client install",

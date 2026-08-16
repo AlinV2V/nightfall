@@ -72,11 +72,44 @@ function seatPlayers(game, roles) {
 
 function run(name, fn) {
   try {
-    fn();
+    const result = fn();
+    if (result && typeof result.then === 'function') {
+      throw new Error(`"${name}" returned a promise — use runAsync so it is awaited`);
+    }
     console.log(`PASS ${name}`);
   } catch (error) {
     console.error(`FAIL ${name}`);
     throw error;
+  }
+}
+
+// Async tests are queued and run strictly one at a time once the synchronous
+// sweep is done. Letting them start eagerly meant they overlapped and reset
+// each other's module-level state, and a rejection surfaced as an unhandled
+// promise long after the test had already printed PASS.
+const asyncTests = [];
+function runAsync(name, fn) {
+  asyncTests.push({ name, fn });
+}
+
+process.on('exit', (code) => {
+  if (code === 0 && asyncTests.length) {
+    console.error(`FAIL — ${asyncTests.length} async tests never ran`);
+    process.exitCode = 1;
+  }
+});
+
+async function drainAsyncTests() {
+  while (asyncTests.length) {
+    const { name, fn } = asyncTests.shift();
+    try {
+      await fn();
+      console.log(`PASS ${name}`);
+    } catch (error) {
+      console.error(`FAIL ${name}`);
+      console.error(error);
+      process.exit(1);
+    }
   }
 }
 
@@ -2258,3 +2291,163 @@ run('every waking role in the deck has real behaviour behind it', () => {
   const orphans = wakers.filter(r => !handled.has(r));
   assert.deepEqual(orphans, [], `roles waking with no action: ${orphans.join(', ')}`);
 });
+
+// ── LLM bots ──────────────────────────────────────────────────────────
+// The safety property is structural: a bot is handed getSanitizedState for its
+// own seat, so it is never given information to ignore. These tests pin that
+// down, and pin down that a missing or misbehaving API changes nothing.
+
+const llmBots = require('./llmBots');
+
+run('a bot is shown only what its own seat can see', () => {
+  const game = makeGame();
+  seatPlayers(game, ['Werewolf', 'Seer', 'Villager', 'Villager']);
+  game.players.forEach(p => { p.isBot = true; });
+  game.phase = 'day';
+
+  // p3 is an ordinary villager: their view must not name anyone's card.
+  const view = game.botView('p3');
+  assert.equal(view.myOriginalRole, 'Villager');
+  assert.deepEqual(view.publicAssignments, {}, 'no role map before the end');
+  assert.deepEqual(view.centerCards, [null, null, null], 'center stays hidden');
+  assert.deepEqual(view.chronicle, [], 'the chronicle is sealed mid-game');
+  view.players.forEach((p) => {
+    if (p.id !== 'p3') assert.equal(p.revealedRole, null, `${p.id} leaked a role to a villager`);
+  });
+
+  // And the text handed to the model carries no more than the view does.
+  const text = llmBots.describeView(view, 'Player 3');
+  assert.equal(text.includes('Werewolf'), false, 'the prompt named a hidden werewolf');
+  assert.equal(text.includes('Seer'), false, 'the prompt named a hidden seer');
+  game.clearAllTimers();
+});
+
+run('a wolf bot sees its packmates, exactly as a human wolf would', () => {
+  const game = makeGame();
+  seatPlayers(game, ['Werewolf', 'Werewolf', 'Seer', 'Villager']);
+  game.players.forEach(p => { p.isBot = true; });
+  game.phase = 'day';
+
+  const view = game.botView('p1');
+  const packmate = view.players.find(p => p.id === 'p2');
+  assert.equal(packmate.revealedRole, 'Werewolf', 'wolves should recognise each other');
+  const seer = view.players.find(p => p.id === 'p3');
+  assert.equal(seer.revealedRole, null, 'but not see the village');
+  game.clearAllTimers();
+});
+
+runAsync('with no API key the engine behaves exactly as before', () => {
+  const saved = process.env.DEEPSEEK_API_KEY;
+  delete process.env.DEEPSEEK_API_KEY;
+  const game = makeGame();
+  seatPlayers(game, ['Werewolf', 'Seer', 'Villager', 'Villager']);
+  assert.equal(game.llmEnabled(), false);
+
+  // Every LLM entry point declines rather than throwing.
+  return Promise.all([
+    game.askLlmToRetarget('p1', 'Werewolf', { type: 'kill', target1: 'p2' }),
+    game.askLlmForAccusation(game.players[0], ['p2', 'p3']),
+    game.askLlmForVerdict(game.players[0], 'Player 2'),
+  ]).then(([retarget, accuse, verdict]) => {
+    assert.deepEqual(retarget, { type: 'kill', target1: 'p2' }, 'decision passes through untouched');
+    assert.equal(accuse, null);
+    assert.equal(verdict, null);
+    if (saved) process.env.DEEPSEEK_API_KEY = saved;
+    game.clearAllTimers();
+  });
+});
+
+runAsync('a model answer naming an illegal target is discarded', () => {
+  process.env.DEEPSEEK_API_KEY = 'test-key';
+  llmBots._resetBreaker();
+  // The model names somebody who is not on the list at all.
+  llmBots.setTransport(async () => JSON.stringify({ id: 'p99', reason: 'nonsense' }));
+
+  const game = makeGame();
+  seatPlayers(game, ['Werewolf', 'Seer', 'Villager', 'Villager']);
+  game.players.forEach(p => { p.isBot = true; });
+  game.phase = 'night';
+
+  return game.askLlmToRetarget('p1', 'Werewolf', { type: 'kill', target1: 'p2' }).then((d) => {
+    assert.deepEqual(d, { type: 'kill', target1: 'p2' }, 'the heuristic target must stand');
+    llmBots.setTransport(null);
+    delete process.env.DEEPSEEK_API_KEY;
+    game.clearAllTimers();
+  });
+});
+
+runAsync('a valid model answer is used', () => {
+  process.env.DEEPSEEK_API_KEY = 'test-key';
+  llmBots._resetBreaker();
+  llmBots.setTransport(async () => JSON.stringify({ id: 'p4', reason: 'they went quiet' }));
+
+  const game = makeGame();
+  seatPlayers(game, ['Werewolf', 'Seer', 'Villager', 'Villager']);
+  game.players.forEach(p => { p.isBot = true; });
+  game.phase = 'night';
+
+  return game.askLlmToRetarget('p1', 'Werewolf', { type: 'kill', target1: 'p2' }).then((d) => {
+    assert.equal(d.target1, 'p4');
+    assert.equal(d.type, 'kill', 'only the target changes, never the action');
+    llmBots.setTransport(null);
+    delete process.env.DEEPSEEK_API_KEY;
+    game.clearAllTimers();
+  });
+});
+
+runAsync('garbage from the model never reaches the game', () => {
+  process.env.DEEPSEEK_API_KEY = 'test-key';
+  const game = makeGame();
+  seatPlayers(game, ['Werewolf', 'Seer', 'Villager', 'Villager']);
+  game.players.forEach(p => { p.isBot = true; });
+  game.phase = 'night';
+
+  const junk = ['not json at all', '', '{"id":', 'null', '{"wrong":"shape"}'];
+  return junk.reduce((chain, payload) => chain.then(() => {
+    llmBots._resetBreaker();
+    llmBots.setTransport(async () => payload);
+    return game.askLlmToRetarget('p1', 'Werewolf', { type: 'kill', target1: 'p2' })
+      .then(d => assert.deepEqual(d, { type: 'kill', target1: 'p2' }, `payload ${JSON.stringify(payload)} got through`));
+  }), Promise.resolve()).then(() => {
+    llmBots.setTransport(null);
+    delete process.env.DEEPSEEK_API_KEY;
+    game.clearAllTimers();
+  });
+});
+
+runAsync('a failing API trips the breaker instead of stalling every decision', () => {
+  process.env.DEEPSEEK_API_KEY = 'test-key';
+  llmBots._resetBreaker();
+  let calls = 0;
+  llmBots.setTransport(async () => { calls += 1; return null; });
+
+  const game = makeGame();
+  seatPlayers(game, ['Werewolf', 'Seer', 'Villager', 'Villager']);
+  game.players.forEach(p => { p.isBot = true; });
+  game.phase = 'night';
+
+  const once = () => game.askLlmToRetarget('p1', 'Werewolf', { type: 'kill', target1: 'p2' });
+  return once().then(once).then(once).then(once).then(once).then(() => {
+    assert.ok(llmBots._breakerOpen(), 'the breaker should be open after repeated failures');
+    assert.ok(calls <= 3, `stopped calling a dead API, made ${calls} calls`);
+    llmBots.setTransport(null);
+    llmBots._resetBreaker();
+    delete process.env.DEEPSEEK_API_KEY;
+    game.clearAllTimers();
+  });
+});
+
+
+run('an async bot callback that rejects cannot take the server down', () => {
+  const game = makeGame();
+  // Bot callbacks gained an async path when they were allowed to consult a
+  // model; a rejection from one is an unhandled rejection, which is fatal on
+  // modern Node unless it is caught at the scheduler.
+  assert.doesNotThrow(() => {
+    game.scheduleBotTimer(async () => { throw new Error('boom'); }, 5);
+    game.scheduleBotTimer(() => { throw new Error('boom'); }, 5);
+  });
+  game.clearAllTimers();
+});
+
+drainAsyncTests();

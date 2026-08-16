@@ -238,6 +238,8 @@ const GHOST_CHAT_PHASES = new Set(['day', 'accusation', 'defense', 'trial']);
 const EVENT_LOG_SENT = 14;
 const BOT_LOG_SENT = 50;
 
+const llmBots = require('./llmBots');
+
 class GameEngine {
   constructor(roomId, roomIo, rawIo) {
     this.roomId = roomId;
@@ -424,7 +426,18 @@ class GameEngine {
   scheduleBotTimer(fn, delay) {
     const id = setTimeout(() => {
       this.botTimers.delete(id);
-      try { fn(); } catch (err) { console.error('[bot]', err); }
+      try {
+        // Bot callbacks became async when they gained the option of consulting a
+        // model. A rejected promise from one is an unhandled rejection, which
+        // takes the whole server down on modern Node — so the async path needs
+        // catching just as much as the synchronous one.
+        const result = fn();
+        if (result && typeof result.catch === 'function') {
+          result.catch(err => console.error('[bot]', err));
+        }
+      } catch (err) {
+        console.error('[bot]', err);
+      }
     }, delay);
     this.botTimers.add(id);
     return id;
@@ -727,7 +740,7 @@ class GameEngine {
 
     botActors.forEach((botId, idx) => {
       const baseDelay = 1200 + idx * 700 + Math.floor(Math.random() * 400);
-      this.scheduleBotTimer(() => {
+      this.scheduleBotTimer(async () => {
         if (this.phase !== 'night') return;
         if (this.currentNightAction !== role) return;
         if (this.nightActionsReceived[botId]) return;
@@ -737,8 +750,15 @@ class GameEngine {
         } else {
           decision = this.buildBotNightDecision(botId, role);
         }
+        // The model may re-aim a decision the heuristic already made legal. It
+        // can only swap one valid target for another, so a poor answer — or no
+        // answer at all — costs nothing.
+        decision = await this.askLlmToRetarget(botId, role, decision);
         const bot = this.players.find(p => p.id === botId);
         if (!bot) return;
+        // The night can move on while the model is thinking.
+        if (this.phase !== 'night' || this.currentNightAction !== role) return;
+        if (this.nightActionsReceived[botId]) return;
         if (!decision) {
           // Mark as completed without doing anything (shouldn't normally happen)
           const actorsNow = this.getActiveActors(role).map(id => this.getPlayerName(id)).join(', ') || 'none';
@@ -752,6 +772,134 @@ class GameEngine {
         this.logBotEvent(bot.name, role, decision.type, detail);
         this.handleNightAction(bot.socketId, decision);
       }, baseDelay);
+    });
+  }
+
+  // ──────────────────────────────────────────────────────────
+  // LLM BOTS
+  //
+  // A bot's view of the game is literally getSanitizedState for its own seat —
+  // the same payload the human at that seat would receive. That is what stops
+  // an LLM bot from cheating: it is not asked to ignore hidden information, it
+  // is never given any. Every call is optional and every failure falls through
+  // to the heuristic bot, so the game plays identically with no API key set.
+  // ──────────────────────────────────────────────────────────
+
+  llmEnabled() {
+    return llmBots.isEnabled();
+  }
+
+  botView(botId) {
+    const bot = this.players.find(p => p.id === botId);
+    return bot ? this.getSanitizedState(bot.socketId) : null;
+  }
+
+  // Living players a bot is allowed to name, as {id, label} for the model.
+  livingOptions(botId, { includeSelf = false } = {}) {
+    return this.players
+      .filter(p => this.hasLiveAssignment(p.id) && (includeSelf || p.id !== botId))
+      .map(p => ({ id: p.id, label: this.getPlayerName(p.id) }));
+  }
+
+  async askLlmToRetarget(botId, role, decision) {
+    if (!decision || !decision.target1 || !this.llmEnabled()) return decision;
+    const bot = this.players.find(p => p.id === botId);
+    const view = this.botView(botId);
+    if (!bot || !view) return decision;
+
+    // Only ever offered targets the heuristic would also accept.
+    const options = this.livingOptions(botId);
+    if (options.length < 2) return decision;
+
+    try {
+      const choice = await llmBots.chooseTarget({
+        view,
+        selfName: bot.name,
+        playerId: botId,
+        task: `It is night. As the ${role}, choose who to use your ability on tonight.`,
+        options,
+      });
+      if (!choice) return decision;
+      this.logBotEvent(bot.name, role, 'llm-night',
+        `${this.getPlayerName(choice.target)} — ${choice.reason}`);
+      return { ...decision, target1: choice.target };
+    } catch {
+      return decision;
+    }
+  }
+
+  async askLlmForAccusation(voter, candidates) {
+    if (!this.llmEnabled() || candidates.length === 0) return null;
+    const view = this.botView(voter.id);
+    if (!view) return null;
+    const options = candidates.map(id => ({ id, label: this.getPlayerName(id) }));
+    options.push({ id: SKIP_VOTE, label: 'Accuse nobody today' });
+    try {
+      const choice = await llmBots.chooseTarget({
+        view,
+        selfName: voter.name,
+        playerId: voter.id,
+        task: 'The village is choosing who to put on trial. Who do you accuse?',
+        options,
+      });
+      if (!choice) return null;
+      this.logBotEvent(voter.name, this.assignments[voter.id]?.currentRole || '?', 'llm-accuse',
+        `${choice.target === SKIP_VOTE ? 'skip' : this.getPlayerName(choice.target)} — ${choice.reason}`);
+      return choice.target;
+    } catch {
+      return null;
+    }
+  }
+
+  async askLlmForVerdict(voter, accusedName) {
+    if (!this.llmEnabled()) return null;
+    const view = this.botView(voter.id);
+    if (!view) return null;
+    try {
+      const choice = await llmBots.chooseTarget({
+        view,
+        selfName: voter.name,
+        playerId: voter.id,
+        task: `${accusedName} is on trial. Vote to hang them or spare them.`,
+        options: [
+          { id: 'eliminate', label: `Hang ${accusedName}` },
+          { id: 'save', label: `Spare ${accusedName}` },
+        ],
+      });
+      if (!choice) return null;
+      this.logBotEvent(voter.name, this.assignments[voter.id]?.currentRole || '?', 'llm-verdict',
+        `${choice.target} — ${choice.reason}`);
+      return choice.target;
+    } catch {
+      return null;
+    }
+  }
+
+  // Table talk. Bots argue during the day, which is the whole point of playing
+  // against a model rather than a dice roll.
+  scheduleBotChatter() {
+    if (!this.llmEnabled() || !this.settings.enableVillagerChat) return;
+    const speakers = this.players.filter(p => this.isBotPlayer(p) && this.hasLiveAssignment(p.id));
+    speakers.forEach((bot, idx) => {
+      const delay = 3000 + idx * 4200 + Math.floor(Math.random() * 1500);
+      this.scheduleBotTimer(async () => {
+        if (this.phase !== 'day' || !this.hasLiveAssignment(bot.id)) return;
+        const view = this.botView(bot.id);
+        if (!view) return;
+        let line = null;
+        try {
+          line = await llmBots.chooseChatLine({ view, selfName: bot.name, playerId: bot.id });
+        } catch { line = null; }
+        if (!line) return;
+        if (this.phase !== 'day') return;
+        this.emitToRoom('villagerChatMessage', {
+          sender: bot.name,
+          senderId: bot.id,
+          text: line,
+          ts: Date.now(),
+        });
+        this.logBotEvent(bot.name, this.assignments[bot.id]?.currentRole || '?', 'llm-say', line);
+      }, delay);
     });
   }
 
@@ -3340,6 +3488,7 @@ class GameEngine {
     });
 
     this.broadcastState();
+    this.scheduleBotChatter();
 
     this.startPhaseTimer(this.settings.discussionLength, () => this.startAccusation());
   }
@@ -3448,7 +3597,7 @@ class GameEngine {
     if (voters.length === 0) return;
     voters.forEach((voter, idx) => {
       const delay = 2000 + idx * 800 + Math.floor(Math.random() * 600);
-      this.scheduleBotTimer(() => {
+      this.scheduleBotTimer(async () => {
         if (this.phase !== 'accusation') return;
         if (Object.prototype.hasOwnProperty.call(this.accusationVotes, voter.id)) return;
         const candidates = this.getVotingPlayers()
@@ -3464,7 +3613,11 @@ class GameEngine {
         } else {
           target = this.pickRandom(candidates);
         }
+        target = (await this.askLlmForAccusation(voter, candidates)) || target;
         if (!target) target = SKIP_VOTE;
+        // The phase can end while the model is thinking.
+        if (this.phase !== 'accusation') return;
+        if (Object.prototype.hasOwnProperty.call(this.accusationVotes, voter.id)) return;
         this.logBotEvent(voter.name, myRole || '?', 'accuse',
           target === SKIP_VOTE ? 'skipped' : `accused ${this.getPlayerName(target)}`);
         this.handleAccusation(voter.socketId, target);
@@ -3638,21 +3791,30 @@ class GameEngine {
     const accusedRole = this.assignments[this.accusedId]?.currentRole;
     voters.forEach((voter, idx) => {
       const delay = 1500 + idx * 700 + Math.floor(Math.random() * 500);
-      this.scheduleBotTimer(() => {
+      this.scheduleBotTimer(async () => {
         if (this.phase !== 'trial') return;
         if (Object.prototype.hasOwnProperty.call(this.trialVotes, voter.id)) return;
         const myRole = this.assignments[voter.id]?.currentRole;
         let choice;
+        let fromModel = false;
         if (this.isVoteImmune(this.accusedId)) {
           choice = 'save';
         } else if (myRole === 'Pacifist') {
+          // A Pacifist never votes to hang, whatever a model would argue.
           choice = 'save';
         } else if (this.isWerewolfRole(myRole)) {
           choice = this.isWolfTeamRole(accusedRole) ? 'save' : 'eliminate';
+          fromModel = true;
         } else {
           // Villagers / neutrals lean toward eliminating someone the village suspects.
           choice = Math.random() < 0.65 ? 'eliminate' : 'save';
+          fromModel = true;
         }
+        if (fromModel) {
+          choice = (await this.askLlmForVerdict(voter, this.getPlayerName(this.accusedId))) || choice;
+        }
+        if (this.phase !== 'trial') return;
+        if (Object.prototype.hasOwnProperty.call(this.trialVotes, voter.id)) return;
         this.logBotEvent(voter.name, myRole || '?', 'trial', `voted ${choice}`);
         this.handleTrialVote(voter.socketId, choice);
       }, delay);

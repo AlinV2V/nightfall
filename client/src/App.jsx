@@ -1515,6 +1515,7 @@ const GameHeader = ({
   dayCount,
   onLeave,
   onOpenRuleBook,
+  onOpenGuide,
   muted,
   volume,
   onToggleMute,
@@ -1530,6 +1531,17 @@ const GameHeader = ({
       <div className="status-badge">
         {roomId} · Day {dayCount}
       </div>
+      {onOpenGuide && (
+        <button
+          className="btn-secondary rule-book-btn"
+          onClick={onOpenGuide}
+          aria-label="How to play"
+          title="How to play"
+        >
+          <BadgeQuestionMark size={15} />
+          <span className="header-btn-label">How to play</span>
+        </button>
+      )}
       {onOpenRuleBook && (
         <button
           className="btn-secondary rule-book-btn"
@@ -1538,7 +1550,7 @@ const GameHeader = ({
           title="Rule Book"
         >
           <BookOpen size={15} />
-          <span>Rule Book</span>
+          <span className="header-btn-label">Rule Book</span>
         </button>
       )}
       {onOpenBotConsole && botCount > 0 && (
@@ -2813,6 +2825,7 @@ function App() {
   const executionAudioRef = useRef({});
   const cthulhuProcRef = useRef({ ctx: null, stop: null });
   const beesV2ProcRef = useRef({ ctx: null, stop: null });
+  const sceneProcRef = useRef({ ctx: null, stop: null });
   const mutedRef = useRef(muted);
   const volumeRef = useRef(volume);
   const lobbyMusicMutedRef = useRef(lobbyMusicMuted);
@@ -3136,6 +3149,194 @@ function App() {
     socket.on('chatMessage', handleChatMessage);
     socket.on('villagerChatMessage', handleVillagerChatMessage);
     socket.on('ghostChatMessage', handleGhostChatMessage);
+    // ── Procedural stings for the short execution scenes ──────────────
+    // Four of the six scenes shipped with no audio at all: their mp3 files do
+    // not exist, so they played in silence. These are synthesised instead of
+    // downloaded, which means they add nothing to the payload and — more
+    // usefully — they are driven by the same duration the CSS animations are,
+    // so the hit always lands on the frame the cage actually breaks.
+    const startSceneProcedural = (type, durationMs, masterVolume) => {
+      try {
+        let ctx = sceneProcRef.current.ctx;
+        if (!ctx) {
+          const Ctx = window.AudioContext || window.webkitAudioContext;
+          if (!Ctx) return;
+          ctx = new Ctx();
+          sceneProcRef.current.ctx = ctx;
+        }
+        if (ctx.state === 'suspended') ctx.resume().catch(() => {});
+
+        const now = ctx.currentTime;
+        const dur = durationMs / 1000;
+        const vol = Math.min(0.4, Math.max(masterVolume, 0) * 0.5);
+        if (vol <= 0) return;
+
+        const out = ctx.createGain();
+        out.gain.setValueAtTime(vol, now);
+        // Matches .exec-scene's execFadeOut, which begins 600ms before the end.
+        out.gain.setValueAtTime(vol, now + Math.max(dur - 0.6, 0.2));
+        out.gain.linearRampToValueAtTime(0.0001, now + dur);
+        out.connect(ctx.destination);
+
+        const nodes = [];
+        const noiseBuffer = (secs) => {
+          const buf = ctx.createBuffer(1, Math.max(1, Math.floor(ctx.sampleRate * secs)), ctx.sampleRate);
+          const d = buf.getChannelData(0);
+          let last = 0;
+          for (let i = 0; i < d.length; i++) {
+            // Brown noise reads as weight; white noise reads as hiss.
+            last = (last + 0.02 * (Math.random() * 2 - 1)) / 1.02;
+            d[i] = last * 3.2;
+          }
+          return buf;
+        };
+        const noise = (secs, type_, freq, q) => {
+          const src = ctx.createBufferSource();
+          src.buffer = noiseBuffer(secs);
+          const f = ctx.createBiquadFilter();
+          f.type = type_; f.frequency.value = freq; if (q) f.Q.value = q;
+          const g = ctx.createGain();
+          src.connect(f); f.connect(g); g.connect(out);
+          nodes.push(src);
+          return { src, gain: g.gain, filter: f };
+        };
+        const tone = (wave, freq, dest) => {
+          const o = ctx.createOscillator();
+          o.type = wave; o.frequency.value = freq;
+          const g = ctx.createGain();
+          g.gain.value = 0;
+          o.connect(g); g.connect(dest || out);
+          nodes.push(o);
+          return { osc: o, gain: g.gain, freq: o.frequency };
+        };
+
+        // The moment the cage actually goes, per the CSS keyframe delays.
+        const hit = {
+          thunder: dur - 1.4,
+          tentacles: dur - 1.5,
+          void: dur - 1.7,
+          bees: dur - 1.7,
+        }[type] ?? dur - 1.5;
+
+        if (type === 'thunder') {
+          // Distant rumble that swells, then a crack on the break with a
+          // body-blow underneath it.
+          const rumble = noise(dur, 'lowpass', 180, 0.7);
+          rumble.gain.setValueAtTime(0.05, now);
+          rumble.gain.exponentialRampToValueAtTime(0.5, now + hit);
+          rumble.gain.exponentialRampToValueAtTime(0.02, now + dur);
+          rumble.src.start(now);
+
+          const crack = noise(1.2, 'highpass', 1800);
+          crack.gain.setValueAtTime(0.0001, now);
+          crack.gain.setValueAtTime(0.0001, now + hit - 0.01);
+          crack.gain.linearRampToValueAtTime(0.9, now + hit + 0.012);
+          crack.gain.exponentialRampToValueAtTime(0.0001, now + hit + 0.9);
+          crack.src.start(now + hit - 0.02);
+
+          const boom = tone('sine', 90);
+          boom.gain.setValueAtTime(0.0001, now + hit);
+          boom.gain.linearRampToValueAtTime(0.75, now + hit + 0.03);
+          boom.gain.exponentialRampToValueAtTime(0.0001, now + hit + 1.3);
+          boom.freq.setValueAtTime(110, now + hit);
+          boom.freq.exponentialRampToValueAtTime(34, now + hit + 1.1);
+          boom.osc.start(now + hit);
+        } else if (type === 'void') {
+          // A rising whine that is swallowed: everything cuts to near-silence
+          // as the cage folds in on itself.
+          const whine = tone('sawtooth', 120);
+          whine.gain.setValueAtTime(0.0001, now);
+          whine.gain.exponentialRampToValueAtTime(0.28, now + hit);
+          whine.freq.setValueAtTime(120, now);
+          whine.freq.exponentialRampToValueAtTime(1500, now + hit + 0.5);
+          whine.gain.exponentialRampToValueAtTime(0.0001, now + hit + 0.75);
+          whine.osc.start(now);
+
+          const suck = noise(dur, 'bandpass', 600, 1.4);
+          suck.gain.setValueAtTime(0.06, now);
+          suck.gain.exponentialRampToValueAtTime(0.55, now + hit + 0.35);
+          suck.gain.exponentialRampToValueAtTime(0.0001, now + hit + 0.85);
+          suck.filter.frequency.setValueAtTime(400, now);
+          suck.filter.frequency.exponentialRampToValueAtTime(4000, now + hit + 0.4);
+          suck.src.start(now);
+
+          // The hole left behind.
+          const sub = tone('sine', 40);
+          sub.gain.setValueAtTime(0.0001, now + hit + 0.5);
+          sub.gain.linearRampToValueAtTime(0.5, now + hit + 0.72);
+          sub.gain.exponentialRampToValueAtTime(0.0001, now + dur);
+          sub.osc.start(now + hit + 0.5);
+        } else if (type === 'tentacles') {
+          // Wet, slow and heavy: a low swell, a grab, then the drag.
+          const swell = tone('sine', 55);
+          swell.gain.setValueAtTime(0.12, now);
+          swell.gain.linearRampToValueAtTime(0.42, now + hit);
+          swell.gain.exponentialRampToValueAtTime(0.0001, now + dur);
+          swell.osc.start(now);
+
+          // Sparse wet clicks while the tentacles come up.
+          for (let i = 0; i < 7; i++) {
+            const t = 0.35 + i * (hit - 0.4) / 7;
+            const pop = noise(0.25, 'bandpass', 320 + Math.random() * 700, 6);
+            pop.gain.setValueAtTime(0.0001, now + t);
+            pop.gain.linearRampToValueAtTime(0.3, now + t + 0.02);
+            pop.gain.exponentialRampToValueAtTime(0.0001, now + t + 0.22);
+            pop.src.start(now + t);
+          }
+
+          const grab = noise(1.6, 'lowpass', 900, 1.1);
+          grab.gain.setValueAtTime(0.0001, now + hit);
+          grab.gain.linearRampToValueAtTime(0.8, now + hit + 0.08);
+          grab.gain.exponentialRampToValueAtTime(0.0001, now + hit + 1.4);
+          grab.filter.frequency.setValueAtTime(1400, now + hit);
+          grab.filter.frequency.exponentialRampToValueAtTime(180, now + hit + 1.2);
+          grab.src.start(now + hit);
+        } else if (type === 'bees') {
+          // A swarm that finds them, then lifts.
+          const swarm = ctx.createGain();
+          swarm.gain.setValueAtTime(0.05, now);
+          swarm.gain.exponentialRampToValueAtTime(0.4, now + hit);
+          swarm.gain.exponentialRampToValueAtTime(0.02, now + dur);
+          swarm.connect(out);
+          [82, 97, 113, 131].forEach((f, i) => {
+            const b = tone('sawtooth', f, swarm);
+            b.gain.setValueAtTime(0.16, now);
+            // Wing-beat wobble, slightly different per voice so it never phases.
+            const lfo = ctx.createOscillator();
+            lfo.frequency.value = 7 + i * 1.7;
+            const lg = ctx.createGain();
+            lg.gain.value = 5 + i;
+            lfo.connect(lg); lg.connect(b.osc.frequency);
+            nodes.push(lfo);
+            lfo.start(now);
+            // The swarm rises with the cage.
+            b.freq.setValueAtTime(f, now + hit);
+            b.freq.linearRampToValueAtTime(f * 1.6, now + hit + 1.2);
+            b.osc.start(now);
+          });
+        }
+
+        const stop = () => {
+          try {
+            out.gain.cancelScheduledValues(ctx.currentTime);
+            out.gain.setTargetAtTime(0.0001, ctx.currentTime, 0.05);
+            setTimeout(() => {
+              nodes.forEach((n) => { try { n.stop(); } catch { /* noop */ } });
+              try { out.disconnect(); } catch { /* noop */ }
+            }, 220);
+          } catch { /* noop */ }
+        };
+        sceneProcRef.current.stop = stop;
+        setTimeout(stop, durationMs + 150);
+      } catch { /* noop */ }
+    };
+
+    const stopSceneProcedural = () => {
+      const fn = sceneProcRef.current.stop;
+      sceneProcRef.current.stop = null;
+      if (typeof fn === 'function') fn();
+    };
+
     // Procedural underbed for the cthulhu_abyss scene: subharmonic drone + brown-noise abyssal
     // pressure + a scheduled "wet grab" envelope at the wrap-landing moment + sparse bubble pops.
     // Plays alongside the cthulhu-custom.mp3 track, gated by the master mute/volume controls.
@@ -3439,6 +3640,9 @@ function App() {
             // Layer the procedural underbed alongside the song.
             startCthulhuProcedural(duration, volumeRef.current);
           }
+          if (['tentacles', 'thunder', 'void', 'bees'].includes(payload.type)) {
+            startSceneProcedural(payload.type, duration, volumeRef.current);
+          }
           if (payload.type === 'bees_v2') {
             startBeesV2Procedural(duration, volumeRef.current);
           }
@@ -3457,6 +3661,7 @@ function App() {
             }
             if (payload.type === 'cthulhu_abyss') stopCthulhuProcedural();
             if (payload.type === 'bees_v2') stopBeesV2Procedural();
+            stopSceneProcedural();
             return null;
           }
           return cur;
@@ -3534,6 +3739,7 @@ function App() {
         });
         stopCthulhuProcedural();
         stopBeesV2Procedural();
+        stopSceneProcedural();
       };
   }, [playerId]);
 
@@ -3813,6 +4019,7 @@ function App() {
           />
         </div>
         <SceneAtmosphere cinematic={phaseCinematic} />
+        <QuickGuide open={showQuickGuide} onClose={dismissQuickGuide} />
         <NoticeStack notices={privateNotices} />
         <div className="lobby-card">
           <h1 className="title">Nightfall</h1>
@@ -3824,15 +4031,15 @@ function App() {
           </div>
           <div style={{ display: 'flex', gap: '8px', marginBottom: '1.4rem' }}>
             <button
-              className="btn-secondary"
+              className="btn-secondary join-screen-btn"
+              onClick={() => setShowQuickGuide(true)}
+            >
+              <BadgeQuestionMark size={16} />
+              How to play
+            </button>
+            <button
+              className="btn-secondary join-screen-btn"
               onClick={() => setShowTutorial(true)}
-              style={{
-                flex: 1,
-                display: 'flex',
-                justifyContent: 'center',
-                alignItems: 'center',
-                gap: '8px',
-              }}
             >
               <BookOpen size={16} />
               Read the Rules
@@ -4336,6 +4543,7 @@ function App() {
           dayCount={gameState.dayCount}
           onLeave={handleLeave}
           onOpenRuleBook={() => setShowRuleBook(true)}
+          onOpenGuide={() => setShowQuickGuide(true)}
           muted={muted}
           volume={volume}
           onToggleMute={() => setMuted((m) => !m)}
@@ -4458,12 +4666,14 @@ function App() {
     return (
       <div className="table-scene">
         <SceneAtmosphere cinematic={phaseCinematic} />
+        <QuickGuide open={showQuickGuide} onClose={dismissQuickGuide} />
         <NoticeStack notices={privateNotices} />
         <GameHeader
           roomId={gameState.roomId}
           dayCount={gameState.dayCount}
           onLeave={handleLeave}
           onOpenRuleBook={() => setShowRuleBook(true)}
+          onOpenGuide={() => setShowQuickGuide(true)}
           muted={muted}
           volume={volume}
           onToggleMute={() => setMuted((m) => !m)}
@@ -5414,12 +5624,14 @@ function App() {
     return (
       <div className="table-scene">
         <SceneAtmosphere cinematic={phaseCinematic} />
+        <QuickGuide open={showQuickGuide} onClose={dismissQuickGuide} />
         <NoticeStack notices={privateNotices} />
         <GameHeader
           roomId={gameState.roomId}
           dayCount={gameState.dayCount}
           onLeave={handleLeave}
           onOpenRuleBook={() => setShowRuleBook(true)}
+          onOpenGuide={() => setShowQuickGuide(true)}
           muted={muted}
           volume={volume}
           onToggleMute={() => setMuted((m) => !m)}
@@ -5593,12 +5805,14 @@ function App() {
     return (
       <div className="table-scene">
         <SceneAtmosphere cinematic={phaseCinematic} />
+        <QuickGuide open={showQuickGuide} onClose={dismissQuickGuide} />
         <NoticeStack notices={privateNotices} />
         <GameHeader
           roomId={gameState.roomId}
           dayCount={gameState.dayCount}
           onLeave={handleLeave}
           onOpenRuleBook={() => setShowRuleBook(true)}
+          onOpenGuide={() => setShowQuickGuide(true)}
           muted={muted}
           volume={volume}
           onToggleMute={() => setMuted((m) => !m)}
@@ -5770,12 +5984,14 @@ function App() {
     return (
       <div className="table-scene">
         <SceneAtmosphere cinematic={phaseCinematic} />
+        <QuickGuide open={showQuickGuide} onClose={dismissQuickGuide} />
         <NoticeStack notices={privateNotices} />
         <GameHeader
           roomId={gameState.roomId}
           dayCount={gameState.dayCount}
           onLeave={handleLeave}
           onOpenRuleBook={() => setShowRuleBook(true)}
+          onOpenGuide={() => setShowQuickGuide(true)}
           muted={muted}
           volume={volume}
           onToggleMute={() => setMuted((m) => !m)}
@@ -5962,12 +6178,14 @@ function App() {
     return (
       <div className="table-scene">
         <SceneAtmosphere cinematic={phaseCinematic} />
+        <QuickGuide open={showQuickGuide} onClose={dismissQuickGuide} />
         <NoticeStack notices={privateNotices} />
         <GameHeader
           roomId={gameState.roomId}
           dayCount={gameState.dayCount}
           onLeave={handleLeave}
           onOpenRuleBook={() => setShowRuleBook(true)}
+          onOpenGuide={() => setShowQuickGuide(true)}
           muted={muted}
           volume={volume}
           onToggleMute={() => setMuted((m) => !m)}
@@ -6095,12 +6313,14 @@ function App() {
     return (
       <div className="table-scene">
         <SceneAtmosphere cinematic={phaseCinematic} />
+        <QuickGuide open={showQuickGuide} onClose={dismissQuickGuide} />
         <NoticeStack notices={privateNotices} />
         <GameHeader
           roomId={gameState.roomId}
           dayCount={gameState.dayCount}
           onLeave={handleLeave}
           onOpenRuleBook={() => setShowRuleBook(true)}
+          onOpenGuide={() => setShowQuickGuide(true)}
           muted={muted}
           volume={volume}
           onToggleMute={() => setMuted((m) => !m)}
@@ -6280,12 +6500,14 @@ function App() {
     return (
       <div className="table-scene">
         <SceneAtmosphere cinematic={phaseCinematic} />
+        <QuickGuide open={showQuickGuide} onClose={dismissQuickGuide} />
         <NoticeStack notices={privateNotices} />
         <GameHeader
           roomId={gameState.roomId}
           dayCount={gameState.dayCount}
           onLeave={handleLeave}
           onOpenRuleBook={() => setShowRuleBook(true)}
+          onOpenGuide={() => setShowQuickGuide(true)}
           muted={muted}
           volume={volume}
           onToggleMute={() => setMuted((m) => !m)}

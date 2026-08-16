@@ -2451,3 +2451,58 @@ run('an async bot callback that rejects cannot take the server down', () => {
 });
 
 drainAsyncTests();
+
+run('execution stings stay locked to their animation beats', () => {
+  // The audio is synthesised in the client and the choreography lives in the
+  // stylesheet, so the two carry the same constants in different files. If they
+  // drift the hit no longer lands on the frame the cage goes, which is exactly
+  // the sort of thing nobody notices until it looks cheap.
+  const fs = require('node:fs');
+  const root = `${__dirname}/../client/src`;
+  const css = fs.readFileSync(`${root}/index.css`, 'utf8');
+  const jsx = fs.readFileSync(`${root}/App.jsx`, 'utf8');
+
+  const cssDelay = (cls) => {
+    const m = css.match(new RegExp(`${cls}[^{]*\\{[^}]*?calc\\(var\\(--exec-duration[^)]*\\)\\s*-\\s*(\\d+)ms\\)`));
+    return m ? Number(m[1]) : null;
+  };
+  const hitBlock = jsx.match(/const hit = \{([\s\S]*?)\}\[type\]/);
+  assert.ok(hitBlock, 'the scene sting timings should be discoverable');
+  const audio = {};
+  [...hitBlock[1].matchAll(/(\w+): dur - ([\d.]+)/g)]
+    .forEach((m) => { audio[m[1]] = Math.round(Number(m[2]) * 1000); });
+
+  const pairs = [
+    ['thunder', 'jail-shattered-thunder'],
+    ['void', 'jail-sucked-void'],
+    ['bees', 'jail-lifted-bees'],
+    ['tentacles', 'jail-dragged-tentacles'],
+  ];
+  pairs.forEach(([scene, cls]) => {
+    const visual = cssDelay(cls);
+    assert.ok(visual !== null, `${scene} should anchor its animation to the scene window`);
+    assert.ok(audio[scene] !== undefined, `${scene} should schedule a sting`);
+    assert.equal(visual, audio[scene],
+      `${scene}: cage animates at -${visual}ms but the sting lands at -${audio[scene]}ms`);
+  });
+});
+
+run('every execution scene resolves inside its own window', () => {
+  // A scene whose choreography starts later than the window is long simply
+  // never plays its climax.
+  const fs = require('node:fs');
+  const css = fs.readFileSync(`${__dirname}/../client/src/index.css`, 'utf8');
+  const GameEngine = require('./gameEngine');
+  const game = new GameEngine('T', { emit() {} }, { to() { return { emit() {} }; } });
+
+  ['tentacles', 'thunder', 'void', 'bees', 'bees_v2', 'cthulhu_abyss'].forEach((scene) => {
+    const ms = game.getExecutionSceneDuration(scene);
+    assert.ok(ms >= 2000, `${scene} window of ${ms}ms is too short to read`);
+  });
+
+  // Nothing should still be using a fixed delay where the others use the window.
+  const fixedDelay = css.match(/jail-(?:shattered|sucked|lifted|dragged)-\w+ \.jail-cage \{ animation: \w+ [\d.]+s [^;]*? (\d+(?:\.\d+)?)s both/);
+  assert.equal(fixedDelay, null,
+    `a scene still starts on a fixed delay instead of the scene window: ${fixedDelay && fixedDelay[0]}`);
+  game.clearAllTimers();
+});

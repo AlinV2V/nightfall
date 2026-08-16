@@ -469,11 +469,13 @@ run('Hunter death also kills the Hunter vote target', () => {
   game.accusedId = 'p1'; // Hunter
   game.trialVotes = { p2: 'eliminate', p3: 'eliminate' };
 
+  // Collapse only the execution scene. The Hunter's own choice window must stay
+  // open — it is now bounded, and firing it here would auto-pass the shot.
   const originalSetTimeout = global.setTimeout;
-  global.setTimeout = (fn) => { fn(); return 1; };
+  let fired = 0;
+  global.setTimeout = (fn) => { fired += 1; if (fired === 1) fn(); return fired; };
 
   game.resolveTrial();
-  game.clearAllTimers();
 
   assert.equal(game.assignments.p1.isDead, true);
   assert.equal(game.pendingHunterRevenge, 'p1');
@@ -1928,5 +1930,177 @@ run('dawn deaths are filed under the night that caused them', () => {
   const [nightDeath, dayDeath] = game.chronicle.filter(e => e.type === 'death');
   assert.equal(nightDeath.phase, 'night');
   assert.equal(dayDeath.phase, 'day');
+  game.clearAllTimers();
+});
+
+// ── Wolf team cohesion ────────────────────────────────────────────────
+// The pack chooses its victim before the Alpha Wolf wakes, so a conversion can
+// land on the player already marked to die. The bite must not then kill the
+// packmate the pack just recruited.
+
+run('Alpha Wolf cannot convert someone already on the wolf team', () => {
+  const game = makeGame();
+  seatPlayers(game, ['Alpha Wolf', 'Werewolf', 'Minion', 'Villager', 'Seer']);
+  game.phase = 'night';
+  game.currentNightAction = 'Alpha Wolf';
+  game.currentNightActors = ['p1'];
+  game.alphaWolfCard = 'Werewolf';
+
+  // A fellow wolf is refused.
+  game.handleNightAction('s1', { type: 'convert', target1: 'p2' });
+  assert.equal(game.assignments.p2.currentRole, 'Werewolf');
+  assert.equal(game.nightActionsReceived.p1, undefined, 'the turn should not be consumed');
+
+  // So is wolf support — handing them the card wastes it.
+  game.handleNightAction('s1', { type: 'convert', target1: 'p3' });
+  assert.equal(game.assignments.p3.currentRole, 'Minion');
+  assert.equal(game.nightActionsReceived.p1, undefined);
+
+  // Someone outside the pack works.
+  game.handleNightAction('s1', { type: 'convert', target1: 'p4' });
+  assert.equal(game.assignments.p4.currentRole, 'Werewolf');
+  game.clearAllTimers();
+});
+
+run('the pack does not eat a player who joined it during the night', () => {
+  const game = makeGame();
+  seatPlayers(game, ['Alpha Wolf', 'Werewolf', 'Villager', 'Seer', 'Villager']);
+  game.phase = 'night';
+
+  // The hunt is locked in on p3 while they are still a villager.
+  const killed = new Set();
+  game.assignments.p3.currentRole = 'Werewolf'; // the Alpha converted them after
+  const died = game.resolveWolfKillOnTarget('p3', killed);
+
+  assert.equal(died, false, 'the bite must fizzle');
+  assert.equal(game.assignments.p3.isDead, false);
+  assert.equal(killed.size, 0);
+  game.clearAllTimers();
+});
+
+run('a bot Alpha Wolf never picks a packmate to convert', () => {
+  const game = makeGame();
+  seatPlayers(game, ['Alpha Wolf', 'Werewolf', 'Minion', 'Villager', 'Seer']);
+  game.phase = 'night';
+  game.alphaWolfCard = 'Werewolf';
+
+  for (let i = 0; i < 60; i++) {
+    const decision = game.buildBotNightDecision('p1', 'Alpha Wolf');
+    if (decision.type === 'view') continue;
+    const role = game.assignments[decision.target1].currentRole;
+    assert.equal(game.isWolfTeamRole(role), false, `bot picked packmate ${role}`);
+  }
+  game.clearAllTimers();
+});
+
+run('a bot wolf never bites wolf support either', () => {
+  const game = makeGame();
+  seatPlayers(game, ['Werewolf', 'Minion', 'Squire', 'Villager']);
+  game.phase = 'night';
+  game.dayCount = 2;
+
+  for (let i = 0; i < 60; i++) {
+    const decision = game.buildBotNightDecision('p1', 'Werewolf');
+    if (decision.type !== 'kill') continue;
+    const role = game.assignments[decision.target1].currentRole;
+    assert.equal(game.isWolfTeamRole(role), false, `bot targeted teammate ${role}`);
+  }
+  game.clearAllTimers();
+});
+
+// ── Hunter revenge liveness ───────────────────────────────────────────
+// The last shot halts the whole game on one click. A bot Hunter never clicked
+// at all and a human who left hung the room permanently.
+
+run('a bot Hunter takes its shot instead of hanging the game', () => {
+  const game = makeGame();
+  seatPlayers(game, ['Hunter', 'Werewolf', 'Seer', 'Villager']);
+  game.players[0].isBot = true;
+  game.phase = 'trial';
+
+  const originalSetTimeout = global.setTimeout;
+  const scheduled = [];
+  global.setTimeout = (fn, delay) => { scheduled.push({ fn, delay }); return scheduled.length; };
+
+  game.pendingHunterRevenge = 'p1';
+  game.pendingHunterRevengeKills = [];
+  game.assignments.p1.isDead = true;
+  game.armHunterRevengeTimer('p1');
+
+  // Bots answer fast; nobody waits the full human window on them.
+  assert.ok(scheduled.length > 0, 'a window must be armed');
+  assert.ok(scheduled[0].delay < 5000, `bot window should be short, got ${scheduled[0].delay}`);
+
+  scheduled[0].fn();
+  assert.equal(game.pendingHunterRevenge, null, 'the shot must resolve itself');
+
+  global.setTimeout = originalSetTimeout;
+  game.clearAllTimers();
+});
+
+run('an absent human Hunter passes rather than freezing the room', () => {
+  const game = makeGame();
+  seatPlayers(game, ['Hunter', 'Werewolf', 'Seer', 'Villager']);
+  game.phase = 'trial';
+
+  const originalSetTimeout = global.setTimeout;
+  const scheduled = [];
+  global.setTimeout = (fn, delay) => { scheduled.push({ fn, delay }); return scheduled.length; };
+
+  game.pendingHunterRevenge = 'p1';
+  game.pendingHunterRevengeKills = [];
+  game.assignments.p1.isDead = true;
+  game.armHunterRevengeTimer('p1');
+
+  assert.ok(scheduled[0].delay >= 20000, 'a human deserves a generous window');
+  scheduled[0].fn();
+
+  assert.equal(game.pendingHunterRevenge, null);
+  // Nobody else should be dragged down by a shot that was never taken.
+  assert.equal(game.assignments.p2.isDead, false);
+  assert.equal(game.assignments.p3.isDead, false);
+
+  global.setTimeout = originalSetTimeout;
+  game.clearAllTimers();
+});
+
+run('a bot Hunter on the wolf team does not shoot its own', () => {
+  const game = makeGame();
+  seatPlayers(game, ['Hunter', 'Werewolf', 'Minion', 'Villager']);
+  game.players[0].isBot = true;
+  game.assignments.p1.currentRole = 'Werewolf';
+  game.phase = 'trial';
+
+  const originalSetTimeout = global.setTimeout;
+  for (let i = 0; i < 25; i++) {
+    const scheduled = [];
+    global.setTimeout = (fn) => { scheduled.push(fn); return scheduled.length; };
+    game.assignments.p2.isDead = false;
+    game.assignments.p3.isDead = false;
+    game.assignments.p4.isDead = false;
+    game.pendingHunterRevenge = 'p1';
+    game.pendingHunterRevengeKills = [];
+    game.armHunterRevengeTimer('p1');
+    scheduled[0]();
+    assert.equal(game.assignments.p2.isDead, false, 'shot a fellow wolf');
+    assert.equal(game.assignments.p3.isDead, false, 'shot its own Minion');
+  }
+  global.setTimeout = originalSetTimeout;
+  game.clearAllTimers();
+});
+
+run('protection lists do not keep hold of the dead', () => {
+  const game = makeGame();
+  seatPlayers(game, ['Bodyguard', 'Werewolf', 'Seer', 'Sentinel']);
+  game.phase = 'night';
+  game.protectedPlayers = ['p3'];
+  game.jailedTargets = new Set(['p3']);
+  game.sentinelShielded = 'p3';
+
+  game.markPlayerDead('p3', new Set(), 'wolves');
+
+  assert.equal(game.protectedPlayers.includes('p3'), false);
+  assert.equal(game.jailedTargets.has('p3'), false);
+  assert.equal(game.sentinelShielded, null);
   game.clearAllTimers();
 });

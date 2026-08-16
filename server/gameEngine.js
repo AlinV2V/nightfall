@@ -83,6 +83,10 @@ const FIRST_NIGHT_ONLY_WAKE_ROLES = new Set([
 
 const THIRD_NIGHT_ONLY_WAKE_ROLES = new Set(['Drunk']);
 
+// Roles the Alpha Wolf's spare card cannot claim — each answers to its own
+// faction and cannot be recruited into the pack.
+const ALPHA_CONVERSION_IMMUNE = new Set(['Vampire', 'Cult Leader', 'Cthulhu']);
+
 const WEREWOLF_ROLES = new Set(['Werewolf', 'Alpha Wolf', 'Mystic Wolf', 'Dream Wolf', 'Wolverine', 'Wolf Cub', 'Lone Wolf']);
 const WEREWOLF_WAKE_ROLES = new Set(['Werewolf', 'Alpha Wolf', 'Mystic Wolf', 'Wolverine', 'Wolf Cub', 'Lone Wolf']);
 const WOLF_SUPPORT_ROLES = new Set(['Minion', 'Squire', 'Sorceress']);
@@ -209,6 +213,10 @@ const GAME_RECONNECT_GRACE_MS = 120000;
 // The night queue is a separate concern from the seat and cannot wait out the
 // full window, so a dropped player's hold on it is released much sooner.
 const NIGHT_HOLD_RELEASE_MS = 5000;
+
+// The Hunter's last shot halts the entire game on one player's click, so it
+// gets the same treatment as a night reveal: generous, but never unbounded.
+const HUNTER_REVENGE_GRACE_MS = 30000;
 
 class GameEngine {
   constructor(roomId, roomIo, rawIo) {
@@ -517,9 +525,17 @@ class GameEngine {
       .map(p => p.id);
 
     switch (role) {
+      // The Alpha's own wake is a conversion, not a bite. It has to skip the
+      // whole wolf team, not just the wolves — recruiting a Minion wastes the
+      // card, and recruiting a packmate is rejected outright.
+      case 'Alpha Wolf': {
+        const outsiders = livingOthers.filter(id => !this.isWolfTeamRole(this.assignments[id]?.currentRole)
+          && !ALPHA_CONVERSION_IMMUNE.has(this.assignments[id]?.currentRole));
+        const target = this.pickRandom(outsiders);
+        return target ? { type: 'convert', target1: target } : { type: 'view' };
+      }
       case 'Werewolf':
       case 'Wolverine':
-      case 'Alpha Wolf':
       case 'Mystic Wolf':
       case 'Dream Wolf':
       case 'Wolf Cub':
@@ -527,8 +543,8 @@ class GameEngine {
         if (!this.shouldWerewolvesHuntNow()) {
           return { type: 'view' };
         }
-        const wolves = new Set(this.getNightWerewolfIds());
-        const nonWolves = livingOthers.filter(id => !wolves.has(id));
+        // Never bite the team — wolf support roles included.
+        const nonWolves = livingOthers.filter(id => !this.isWolfTeamRole(this.assignments[id]?.currentRole));
         const target = this.pickRandom(nonWolves.length > 0 ? nonWolves : livingOthers);
         return target ? { type: 'kill', target1: target } : { type: 'view' };
       }
@@ -1167,6 +1183,13 @@ class GameEngine {
       `${this.getPlayerName(playerId)} died — they were the ${assignment.currentRole}.`,
       { playerId, role: assignment.currentRole, cause: cause || this.inferDeathCause() },
     );
+    // Protection and jailing only ever describe the living. Leaving a corpse in
+    // these lists is dead state that later checks have to keep stepping around.
+    this.protectedPlayers = this.protectedPlayers.filter(id => id !== playerId);
+    this.bodyguardGuards.delete(playerId);
+    this.jailedTargets.delete(playerId);
+    if (this.sentinelShielded === playerId) this.sentinelShielded = null;
+
     this.resolveDoppelgangersForDeath(playerId);
     this.promoteApprenticeSeerOnSeerDeath(playerId);
 
@@ -1343,6 +1366,18 @@ class GameEngine {
     const assignment = this.assignments[targetId];
     const role = assignment.currentRole;
 
+    // The pack does not eat its own. The hunt is chosen before the Alpha Wolf
+    // wakes, so the Alpha could convert the very player already marked to die —
+    // and the new packmate was then eaten at dawn by the wolves who recruited
+    // them. Any conversion landing between the choice and the dawn (Alpha Wolf,
+    // Cursed, anything added later) fizzles the bite instead.
+    if (this.isWolfTeamRole(role)) {
+      this.logEvent(`The pack closed on ${targetName} and found one of their own. No blood was spilled.`);
+      this.logBotEvent('System', 'Werewolf', 'fizzled',
+        `${targetName} (${role}) was already pack when the hunt resolved.`);
+      return false;
+    }
+
     // The Reflector's mirror: any attacker targeting a mirrored player strikes themselves.
     // For the wolf pack — which has no single attacker — the bounce hits a random living wolf.
     if (this.isReflectorMirrored(targetId)) {
@@ -1355,7 +1390,7 @@ class GameEngine {
       if (victim) {
         const victimName = this.getPlayerName(victim);
         this.logEvent(`The Reflector's mirror flung the attack back — ${victimName} fell to the pack's own fangs.`);
-        this.markPlayerDead(victim, killedSet, 'wolves');
+        this.markPlayerDead(victim, killedSet, 'mirror');
       } else {
         this.logEvent(`The Reflector's mirror flashed — but the wolves vanished into the dark before it could strike them.`);
       }
@@ -2468,25 +2503,32 @@ class GameEngine {
         break;
       }
 
-      case 'Alpha Wolf':
+      case 'Alpha Wolf': {
         if (!target1 || !this.hasLiveAssignment(target1) || target1 === pid) {
           this.emitActionError(socketId, 'Choose another living player.');
+          return;
+        }
+        const targetRole = this.assignments[target1].currentRole;
+        // Rejected rather than silently failed: handing the spare card to
+        // someone already on the team burns it for nothing, and the actor
+        // should get the chance to pick again.
+        if (this.isWolfTeamRole(targetRole)) {
+          this.emitActionError(socketId, 'They already run with the pack. Choose someone outside it.');
           return;
         }
         if (this.blockProtectedEffect(socketId, target1)) {
           break;
         }
-        const targetRole = this.assignments[target1].currentRole;
-        const isImmune = ['Vampire', 'Cult Leader', 'Cthulhu'].includes(targetRole);
-        if (this.alphaWolfCard && !this.isWerewolfRole(targetRole) && !isImmune) {
+        if (this.alphaWolfCard && !ALPHA_CONVERSION_IMMUNE.has(targetRole)) {
           const oldRole = targetRole;
           this.applyRoleChange(target1, this.alphaWolfCard);
           this.alphaWolfCard = oldRole;
-          this.emitActionResult(socketId,{ type: 'alphaResult', success: true });
+          this.emitActionResult(socketId, { type: 'alphaResult', success: true });
         } else {
-          this.emitActionResult(socketId,{ type: 'alphaResult', success: false });
+          this.emitActionResult(socketId, { type: 'alphaResult', success: false });
         }
         break;
+      }
 
       case 'Mystic Wolf':
         if (!target1 || !this.hasLiveAssignment(target1) || target1 === pid) {
@@ -3674,6 +3716,7 @@ class GameEngine {
         if (eliminatedRole === 'Hunter') {
           this.pendingHunterRevenge = targetId;
           this.pendingHunterRevengeKills = [...killed];
+          this.armHunterRevengeTimer(targetId);
           this.accusedId = null;
           this.logEvent(`${targetName} was the Hunter — they may immediately take another player down.`);
           this.emitPrivateNotice(targetId, {
@@ -3728,6 +3771,7 @@ class GameEngine {
         if (eliminatedRole === 'Hunter') {
           this.pendingHunterRevenge = targetId;
           this.pendingHunterRevengeKills = [...killed];
+          this.armHunterRevengeTimer(targetId);
           this.accusedId = null;
           this.logEvent(`${targetName} was the Hunter — they may immediately take another player down.`);
           this.emitPrivateNotice(targetId, {
@@ -3749,11 +3793,50 @@ class GameEngine {
     this.broadcastState();
   }
 
+  // The Hunter's last shot pauses the whole game on one person's click. Bots
+  // never clicked at all, and a human who closed the tab hung the room for
+  // good, so the choice is both automated for bots and bounded for everyone.
+  armHunterRevengeTimer(hunterId) {
+    this.clearTimer();
+    const hunter = this.players.find(p => p.id === hunterId);
+    const delay = hunter && hunter.isBot
+      ? 900 + Math.floor(Math.random() * 600)
+      : HUNTER_REVENGE_GRACE_MS;
+    this.timeLeft = Math.ceil(delay / 1000);
+    this.phaseDuration = this.timeLeft;
+    this.phaseEndsAt = Date.now() + delay;
+    this.timer = setTimeout(() => {
+      if (this.pendingHunterRevenge !== hunterId) return;
+      let choice = SKIP_VOTE;
+      if (hunter && hunter.isBot) {
+        // A bot takes someone outside its own team where it can tell.
+        const hunterRole = this.assignments[hunterId]?.currentRole;
+        const hunterIsWolf = this.isWolfTeamRole(hunterRole);
+        const candidates = this.players
+          .filter(p => p.id !== hunterId && this.hasLiveAssignment(p.id))
+          .filter(p => hunterIsWolf
+            ? !this.isWolfTeamRole(this.assignments[p.id].currentRole)
+            : true)
+          .map(p => p.id);
+        choice = this.pickRandom(candidates) || SKIP_VOTE;
+      }
+      this.logBotEvent(this.getPlayerName(hunterId) || hunterId, 'Hunter', 'auto-shot',
+        choice === SKIP_VOTE ? 'Time ran out; the shot went wide.' : `Auto-targeted ${this.getPlayerName(choice)}.`);
+      this.applyHunterRevenge(hunterId, choice);
+    }, delay);
+  }
+
   resolveHunterRevenge(socketId, targetId) {
     const hunterId = this.pendingHunterRevenge;
     if (!hunterId) return;
     const pInfo = this.players.find(p => p.socketId === socketId);
     if (!pInfo || pInfo.id !== hunterId) return;
+    this.applyHunterRevenge(hunterId, targetId);
+  }
+
+  applyHunterRevenge(hunterId, targetId) {
+    if (this.pendingHunterRevenge !== hunterId) return;
+    this.clearTimer();
 
     const killed = new Set(this.pendingHunterRevengeKills || []);
     this.pendingHunterRevenge = null;

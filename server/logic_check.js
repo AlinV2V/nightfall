@@ -834,38 +834,32 @@ run('Per-night Reflector/Disruptor/Yandere targets clear after dawn', () => {
   assert.deepEqual(game.yandereActiveShield, {}, 'yandere shield cleared after dawn');
 });
 
-run('Ghost-chat is conferred on death — every dead player can letter-speak during day phases', () => {
+run('ghost chat is gated on lingering, not merely on dying', () => {
   const game = makeGame();
   seatPlayers(game, ['Villager', 'Werewolf', 'Seer', 'Hunter']);
-  // Mark two players dead through different paths so we know it isn't tied to a
-  // specific role (which was the bug — only dead-Ghost-original could speak before).
-  game.assignments.p1.isDead = true; // Villager, never had any "Ghost" attribute
-  game.assignments.p3.isDead = true; // Seer
+  game.assignments.p1.isDead = true; // lingered
+  game.assignments.p3.isDead = true; // did not
+  game.ghosts = new Set(['p1']);
 
-  // Day-phase check: both dead players can speak.
   game.phase = 'day';
-  assert.equal(game.canUseGhostChat('s1'), true, 'dead Villager can letter-speak');
-  assert.equal(game.canUseGhostChat('s3'), true, 'dead Seer can letter-speak');
-  // Living players still cannot.
+  assert.equal(game.canUseGhostChat('s1'), true, 'the raised ghost may speak');
+  assert.equal(game.canUseGhostChat('s3'), false, 'an ordinary corpse may not');
   assert.equal(game.canUseGhostChat('s2'), false, 'living Werewolf cannot letter-speak');
   assert.equal(game.canUseGhostChat('s4'), false, 'living Hunter cannot letter-speak');
 
-  // Night-phase check: nobody can speak (chat is day-only by design).
+  // Day-only by design.
   game.phase = 'night';
   assert.equal(game.canUseGhostChat('s1'), false, 'ghost-chat closed during night');
-  assert.equal(game.canUseGhostChat('s3'), false, 'ghost-chat closed during night');
 
-  // Sanitized state during day: ghostInfo.active is true for everyone, canSpeak
-  // is true only for the dead. (Previously: ghostInfo was null unless a Ghost
-  // was dealt in the deck.)
+  // Letters are public, so the panel stays readable for everyone during the day.
   game.phase = 'day';
   const stateLive = game.getSanitizedState('s2');
   assert.ok(stateLive.ghostInfo && stateLive.ghostInfo.active === true,
-    'ghost panel is always active during day for living players too (they can read)');
+    'ghost panel stays visible so the village can read the letters');
   assert.equal(stateLive.ghostInfo.canSpeak, false, 'living player cannot speak');
 
-  const stateDead = game.getSanitizedState('s1');
-  assert.equal(stateDead.ghostInfo.canSpeak, true, 'dead player can speak');
+  const stateGhost = game.getSanitizedState('s1');
+  assert.equal(stateGhost.ghostInfo.canSpeak, true, 'the ghost can speak');
 });
 
 run('After VI rotation, Night 2 sanitized state surfaces the new currentRole (day-vs-night mismatch fix)', () => {
@@ -2103,4 +2097,164 @@ run('protection lists do not keep hold of the dead', () => {
   assert.equal(game.jailedTargets.has('p3'), false);
   assert.equal(game.sentinelShielded, null);
   game.clearAllTimers();
+});
+
+// ── Ghosts ────────────────────────────────────────────────────────────
+// Dying is a chance to linger, not a promise. A ghost gets one letter per day —
+// previously every corpse could type freely, which made the channel a second
+// town chat instead of a rare, weighty signal.
+
+run('a ghost speaks once per day and no more', () => {
+  const game = makeGame();
+  seatPlayers(game, ['Werewolf', 'Villager', 'Seer', 'Villager']);
+  game.phase = 'day';
+  game.dayCount = 2;
+  game.assignments.p2.isDead = true;
+  game.ghosts = new Set(['p2']);
+
+  assert.equal(game.handleGhostMessage('s2', 'R'), true);
+  assert.equal(game.handleGhostMessage('s2', 'X'), false, 'a second letter the same day');
+  assert.equal(game.handleGhostMessage('s2', 'Y'), false);
+
+  // A new day restores the allowance.
+  game.dayCount = 3;
+  assert.equal(game.handleGhostMessage('s2', 'S'), true);
+  assert.equal(game.handleGhostMessage('s2', 'T'), false);
+
+  const letters = game._events.filter(e => e.event === 'ghostChatMessage').map(e => e.data.letter);
+  assert.deepEqual(letters, ['R', 'S']);
+  game.clearAllTimers();
+});
+
+run('only a raised ghost can whisper, not every corpse', () => {
+  const game = makeGame();
+  seatPlayers(game, ['Werewolf', 'Villager', 'Seer', 'Villager']);
+  game.phase = 'day';
+  game.assignments.p2.isDead = true;
+  game.assignments.p3.isDead = true;
+  game.ghosts = new Set(['p2']);
+
+  assert.equal(game.handleGhostMessage('s2', 'A'), true, 'the ghost may speak');
+  assert.equal(game.handleGhostMessage('s3', 'B'), false, 'an ordinary corpse may not');
+  assert.equal(game.handleGhostMessage('s4', 'C'), false, 'and the living certainly may not');
+  game.clearAllTimers();
+});
+
+run('ghosts stay silent outside the day phases', () => {
+  const game = makeGame();
+  seatPlayers(game, ['Werewolf', 'Villager', 'Seer']);
+  game.assignments.p2.isDead = true;
+  game.ghosts = new Set(['p2']);
+
+  game.phase = 'night';
+  assert.equal(game.handleGhostMessage('s2', 'A'), false);
+  game.phase = 'trial';
+  assert.equal(game.handleGhostMessage('s2', 'A'), true);
+  game.clearAllTimers();
+});
+
+run('only the first character of a submission is carried', () => {
+  const game = makeGame();
+  seatPlayers(game, ['Werewolf', 'Villager', 'Seer']);
+  game.phase = 'day';
+  game.assignments.p2.isDead = true;
+  game.ghosts = new Set(['p2']);
+
+  assert.equal(game.handleGhostMessage('s2', 'WEREWOLF IS BOB'), true);
+  const msg = game._events.filter(e => e.event === 'ghostChatMessage').pop();
+  assert.equal(msg.data.letter, 'W');
+  game.clearAllTimers();
+});
+
+run('deaths roll independently for the ghost chance', () => {
+  const game = makeGame();
+  seatPlayers(game, ['Werewolf', 'Villager', 'Seer', 'Villager']);
+  game.phase = 'night';
+
+  const original = Math.random;
+  // A roll under the threshold raises a ghost; one over it does not.
+  Math.random = () => 0.05;
+  assert.equal(game.maybeRaiseGhost('p2'), true);
+  Math.random = () => 0.5;
+  assert.equal(game.maybeRaiseGhost('p3'), false);
+  // The same player never raises twice.
+  Math.random = () => 0.05;
+  assert.equal(game.maybeRaiseGhost('p2'), false);
+  Math.random = original;
+
+  assert.deepEqual([...game.ghosts], ['p2']);
+  game.clearAllTimers();
+});
+
+run('ghost state reaches the client without leaking the roll', () => {
+  const game = makeGame();
+  seatPlayers(game, ['Werewolf', 'Villager', 'Seer']);
+  game.phase = 'day';
+  game.assignments.p2.isDead = true;
+  game.ghosts = new Set(['p2']);
+
+  const ghost = game.getSanitizedState('s2').ghostInfo;
+  assert.equal(ghost.isGhost, true);
+  assert.equal(ghost.canSpeak, true);
+  assert.equal(ghost.letterSpent, false);
+
+  game.handleGhostMessage('s2', 'Z');
+  const spent = game.getSanitizedState('s2').ghostInfo;
+  assert.equal(spent.canSpeak, true, 'still a ghost');
+  assert.equal(spent.letterSpent, true, 'but out of letters today');
+
+  const living = game.getSanitizedState('s1').ghostInfo;
+  assert.equal(living.isGhost, false);
+  assert.equal(living.canSpeak, false);
+  game.clearAllTimers();
+});
+
+// ── Role coverage ─────────────────────────────────────────────────────
+
+run('the retired Ghost card cannot be dealt', () => {
+  const game = makeGame();
+  game.addPlayer('p1', 's1', 'A');
+  game.addPlayer('p2', 's2', 'B');
+  game.addPlayer('p3', 's3', 'C');
+
+  // Lingering is rolled for on death, never dealt — a Ghost card would be art
+  // and a name with no behaviour behind it.
+  game.updateSettings('s1', { deck: ['Ghost', 'Werewolf', 'Seer'] });
+  assert.equal(game.settings.deck.includes('Ghost'), false);
+});
+
+run('Wolf Cub and Lone Wolf hunt with the pack rather than waking alone', () => {
+  const game = makeGame();
+  seatPlayers(game, ['Wolf Cub', 'Lone Wolf', 'Villager', 'Seer', 'Villager']);
+  game.dayCount = 2;
+  game.startNight();
+  game.clearAllTimers();
+
+  // Neither gets a wake of its own; a separate phase only bought them an empty
+  // turn on top of the hunt they already join.
+  assert.equal(game.nightQueue.includes('Wolf Cub'), false);
+  assert.equal(game.nightQueue.includes('Lone Wolf'), false);
+
+  // But both are still woken by the Werewolf phase.
+  assert.equal(game.getActorRoleFor('p1', 'Werewolf'), 'Werewolf');
+  assert.equal(game.getActorRoleFor('p2', 'Werewolf'), 'Werewolf');
+  game.clearAllTimers();
+});
+
+run('every waking role in the deck has real behaviour behind it', () => {
+  // Roles falling through to the generic acknowledgement are the ones with a
+  // card and a name but nothing to do.
+  const wakers = ['Seer', 'Robber', 'Troublemaker', 'Witch', 'Priest', 'Bodyguard',
+    'Jailer', 'Cupid', 'Spellcaster', 'Old Hag', 'Vampire', 'Cult Leader', 'Disruptor',
+    'The Reflector', 'Yandere', 'Cthulhu', 'Alpha Wolf', 'Mystic Wolf',
+    'Aura Seer', 'Private Investigator', 'Apprentice Seer', 'Revealer', 'Village Idiot',
+    'Drunk', 'Insomniac', 'Sentinel', 'Curator', 'Sorceress', 'Minion', 'Squire', 'Mason',
+    'Doppelganger', 'Paranormal Investigator'];
+  const src = require('node:fs').readFileSync(`${__dirname}/gameEngine.js`, 'utf8');
+  const start = src.indexOf('handleNightAction(socketId');
+  const body = src.slice(start, src.indexOf('resolveDawnKills()', start));
+  const handled = new Set([...body.matchAll(/case '([^']+)':/g)].map(m => m[1]));
+
+  const orphans = wakers.filter(r => !handled.has(r));
+  assert.deepEqual(orphans, [], `roles waking with no action: ${orphans.join(', ')}`);
 });

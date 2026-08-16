@@ -4087,3 +4087,12 @@ h1, h2, h3, h4 {
   .chronicle-entry-text { font-size: 0.86rem; }
   .chronicle-act { padding-left: 12px; }
 }
+
+/* Ghost chat: the letter allowance is the whole mechanic, so say so plainly. */
+.ghost-chat-note {
+  margin-top: 6px;
+  font-family: var(--font-story);
+  font-style: italic;
+  font-size: 0.82rem;
+  color: var(--text-muted);
+}

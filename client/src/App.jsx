@@ -3572,24 +3572,35 @@ function App() {
         <div ref={ghostChatEndRef} />
       </div>
       {ghostInfo.canSpeak ? (
-        <form onSubmit={sendGhostMessage} className="town-chat-form">
-          <input
-            className="town-chat-input"
-            value={ghostChatInput}
-            onChange={(e) => setGhostChatInput(e.target.value.slice(0, 1))}
-            placeholder="One letter…"
-            maxLength={1}
-          />
-          <button
-            type="submit"
-            className="btn-secondary"
-            style={{ padding: '6px 12px', minHeight: 36 }}
-          >
-            <Send size={14} />
-          </button>
-        </form>
+        <>
+          <form onSubmit={sendGhostMessage} className="town-chat-form">
+            <input
+              className="town-chat-input"
+              value={ghostChatInput}
+              onChange={(e) => setGhostChatInput(e.target.value.slice(0, 1))}
+              placeholder="One letter…"
+              maxLength={1}
+            />
+            <button
+              type="submit"
+              className="btn-secondary"
+              style={{ padding: '6px 12px', minHeight: 36 }}
+            >
+              <Send size={14} />
+            </button>
+          </form>
+          <p className="ghost-chat-note">One letter, once today. Spend it well.</p>
+        </>
+      ) : ghostInfo.letterSpent ? (
+        <p className="town-chat-dead">You have spent your letter today. The dark takes the rest.</p>
+      ) : ghostInfo.isGhost ? (
+        <p className="town-chat-dead">Your voice only carries in daylight.</p>
       ) : (
-        <p className="town-chat-dead">Only the dead may whisper here — die first, then you can speak one letter at a time.</p>
+        <p className="town-chat-dead">
+          {ghostInfo.ghostCount > 0
+            ? 'Something lingers and may leave a letter. Watch for it.'
+            : 'Nothing has lingered. Not every death leaves a ghost behind.'}
+        </p>
       )}
     </div>
   ) : null;

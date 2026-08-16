@@ -264,25 +264,13 @@ io.on('connection', (socket) => {
       });
   });
 
-  // Ghost chat: dead Ghost-original players type a single letter per day,
-  // visible to everyone in the room.
+  // Ghost chat: a lingering spirit leaves the village one letter per day. The
+  // rule itself lives in the engine — this only carries the message across.
   socket.on('ghostMessage', (rawText) => {
       if (!rateLimit(socket, 'ghostMessage', 4, 5000)) return;
       const game = rooms[socket.roomId];
-      if (!game || !game.canUseGhostChat(socket.id)) return;
-      const raw = typeof rawText === 'string' ? rawText.trim() : '';
-      if (!raw) return;
-      // Single visible character per emission per the role's card text.
-      const letter = [...raw][0] || '';
-      if (!letter || !letter.match(/[\p{L}\p{N}\p{P}\p{S}]/u)) return;
-      const pInfo = game.players.find(p => p.socketId === socket.id);
-      if (!pInfo) return;
-      io.to(socket.roomId).emit('ghostChatMessage', {
-          sender: pInfo.name,
-          senderId: pInfo.id,
-          letter,
-          ts: Date.now(),
-      });
+      if (!game) return;
+      game.handleGhostMessage(socket.id, rawText);
   });
 
   socket.on('disconnect', () => {

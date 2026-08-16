@@ -13,8 +13,9 @@ const WAKE_ORDER = [
   'Werewolf',
   'Alpha Wolf',
   'Mystic Wolf',
-  'Wolf Cub',
-  'Lone Wolf',
+  // Wolf Cub and Lone Wolf deliberately have no wake of their own — both hunt
+  // within the Werewolf phase, and a separate entry only bought them an empty
+  // turn. Wolf Cub's power is posthumous; Lone Wolf's is a win condition.
   'Minion',
   'Sorceress',
   'Mason',
@@ -47,8 +48,13 @@ const NO_WAKE_ROLES = new Set([
   'Cursed',
   'Diseased',
   'Tough Guy',
-  // Ghost removed as a starting role — every dead player now becomes a ghost-chat
-  // participant. See canUseGhostChat() for the new logic.
+  // Both hunt inside the Werewolf phase (see WEREWOLF_WAKE_ROLES). Listed here
+  // so they cannot reach the wake queue by the fallback route either — a wake of
+  // their own is an empty turn, since Wolf Cub's power is posthumous and Lone
+  // Wolf's is a win condition.
+  'Wolf Cub',
+  'Lone Wolf',
+  // Ghost is not a dealable role at all — lingering is rolled for on death.
   'Family Man',
   'Windy Wendy',
   'Defender-er',
@@ -170,8 +176,9 @@ const SUPPORTED_ROLES = new Set([
   'Cursed',
   'Cult Leader',
   'Diseased',
-  // 'Ghost' is no longer a deck role — the ghost-chat ability now triggers on death
-  // for every player (see canUseGhostChat).
+  // 'Ghost' is deliberately absent: lingering is rolled for on death, not dealt.
+  // Leaving it selectable handed players a card with art, a name, and no
+  // behaviour whatsoever.
   'Lone Wolf',
   'Old Hag',
   'Spellcaster',
@@ -217,6 +224,12 @@ const NIGHT_HOLD_RELEASE_MS = 5000;
 // The Hunter's last shot halts the entire game on one player's click, so it
 // gets the same treatment as a night reveal: generous, but never unbounded.
 const HUNTER_REVENGE_GRACE_MS = 30000;
+
+// Death does not make you a ghost — it gives you a chance at it. Every death
+// rolls independently, so a game may raise none, or several. Rarity is the
+// point: a single letter from beyond is an event, not a running commentary.
+const GHOST_CHANCE = 0.1;
+const GHOST_CHAT_PHASES = new Set(['day', 'accusation', 'defense', 'trial']);
 
 class GameEngine {
   constructor(roomId, roomIo, rawIo) {
@@ -328,6 +341,8 @@ class GameEngine {
     this.nightQueue = [];
     this.chronicle = [];
     this.chronicleAct = null;
+    this.ghosts = new Set();   // the dead who lingered
+    this.ghostLetterDay = {};  // {playerId: dayCount of their last letter}
     this.timeLeft = 0;
     this.phaseEndsAt = null;
     this.phaseDuration = 0;
@@ -1190,6 +1205,7 @@ class GameEngine {
     this.jailedTargets.delete(playerId);
     if (this.sentinelShielded === playerId) this.sentinelShielded = null;
 
+    this.maybeRaiseGhost(playerId);
     this.resolveDoppelgangersForDeath(playerId);
     this.promoteApprenticeSeerOnSeerDeath(playerId);
 
@@ -1754,12 +1770,14 @@ class GameEngine {
     // Check if this player is the Dawn Bringer and if they haven't used their ability yet
     const isDawnBringer = playerId && this.assignments[playerId]?.currentRole === 'Dawn Bringer';
     const dawnBringerAvailable = isDawnBringer && !this.dawnBringerUsed[playerId];
-    // Ghost panel is always visible from day 1 onward, since any death now
-    // confers ghost-chat. canSpeak is still gated per-player on isDead + day phase.
-    const ghostDayPhases = ['day', 'accusation', 'defense', 'trial'];
-    const ghostInfo = ghostDayPhases.includes(this.phase) ? {
+    // Letters are broadcast to the whole village, so the panel stays visible to
+    // everyone; only a ghost with a letter still in hand gets the input.
+    const ghostInfo = GHOST_CHAT_PHASES.has(this.phase) ? {
       active: true,
-      canSpeak: !!(playerId && this.canUseGhostChat(this.players.find(p => p.id === playerId)?.socketId)),
+      isGhost: this.isGhost(playerId),
+      canSpeak: !!(playerId && this.canUseGhostChat(this.getSocketId(playerId))),
+      letterSpent: this.isGhost(playerId) && !this.hasGhostLetterLeft(playerId),
+      ghostCount: this.ghosts.size,
     } : null;
 
     const isJailerChatParticipant = !!(
@@ -4002,18 +4020,63 @@ class GameEngine {
     return true;
   }
 
-  // ── Ghost chat: every player who has died gains the ghost-chat ability.
-  // They may post a single letter at a time, visible to the whole room, during
-  // any of the day phases. (Pre-overhaul: only a dead Ghost-original-role could
-  // speak. Now: ghost is conferred-by-death, not a deck role.)
+  // ── Ghosts ──────────────────────────────────────────────────
+  // Dying gives you a one-in-ten chance of lingering. Ghosts get a single
+  // letter per day, broadcast to the whole village — enough to point, never
+  // enough to explain. The scarcity is what gives a letter its weight; when
+  // every corpse could type freely the channel was just a second town chat.
+
+  maybeRaiseGhost(playerId) {
+    if (this.ghosts.has(playerId)) return false;
+    if (Math.random() >= GHOST_CHANCE) return false;
+    this.ghosts.add(playerId);
+    this.recordChronicle('ghost', `${this.getPlayerName(playerId)} did not rest.`, { playerId });
+    this.logEvent('A cold draught moves through the village. Something did not rest.');
+    this.emitPrivateNotice(playerId, {
+      type: 'ghostRisen',
+      title: 'You Linger',
+      message: 'Death did not take all of you. Once each day you may leave the village a single letter.',
+    });
+    return true;
+  }
+
+  isGhost(playerId) {
+    return !!playerId && this.ghosts.has(playerId);
+  }
+
+  hasGhostLetterLeft(playerId) {
+    return this.isGhost(playerId) && this.ghostLetterDay[playerId] !== this.dayCount;
+  }
+
   canUseGhostChat(socketId) {
     const player = this.players.find(p => p.socketId === socketId);
     if (!player) return false;
-    const dayPhases = ['day', 'accusation', 'defense', 'trial'];
-    if (!dayPhases.includes(this.phase)) return false;
+    if (!GHOST_CHAT_PHASES.has(this.phase)) return false;
     const assignment = this.assignments[player.id];
-    if (!assignment) return false;
-    if (!assignment.isDead) return false;
+    if (!assignment || !assignment.isDead) return false;
+    return this.isGhost(player.id);
+  }
+
+  // Lives here rather than in the socket layer so the one-letter rule is part of
+  // the game and can be tested with the rest of it.
+  handleGhostMessage(socketId, rawText) {
+    const pInfo = this.players.find(p => p.socketId === socketId);
+    if (!pInfo || !this.canUseGhostChat(socketId)) return false;
+    if (!this.hasGhostLetterLeft(pInfo.id)) return false;
+
+    const raw = typeof rawText === 'string' ? rawText.trim() : '';
+    const letter = [...raw][0] || '';
+    if (!letter || !/[\p{L}\p{N}\p{P}\p{S}]/u.test(letter)) return false;
+
+    this.ghostLetterDay[pInfo.id] = this.dayCount;
+    this.emitToRoom('ghostChatMessage', {
+      sender: pInfo.name,
+      senderId: pInfo.id,
+      letter,
+      day: this.dayCount,
+      ts: Date.now(),
+    });
+    this.broadcastState();
     return true;
   }
 
